@@ -142,6 +142,83 @@ async function radar(ctx: any) {
   }, 200, 120);
 }
 
+const WEATHER_POINTS = [
+  ["เชียงใหม่",18.7883,98.9853],["เชียงราย",19.9072,99.8325],["แม่ฮ่องสอน",19.3013,97.9685],
+  ["น่าน",18.7756,100.7730],["ลำปาง",18.2888,99.4909],["พิษณุโลก",16.8211,100.2659],
+  ["ตาก",16.8839,99.1258],["นครสวรรค์",15.7047,100.1372],["อยุธยา",14.3532,100.5689],
+  ["กรุงเทพฯ",13.7563,100.5018],["นครปฐม",13.8199,100.0622],["กาญจนบุรี",14.0228,99.5328],
+  ["ราชบุรี",13.5283,99.8134],["เพชรบุรี",13.1112,99.9391],["ประจวบคีรีขันธ์",11.8124,99.7973],
+  ["นครราชสีมา",14.9799,102.0978],["บุรีรัมย์",14.9930,103.1029],["สุรินทร์",14.8829,103.4937],
+  ["ขอนแก่น",16.4322,102.8236],["อุดรธานี",17.4138,102.7872],["หนองคาย",17.8783,102.7413],
+  ["เลย",17.4860,101.7223],["สกลนคร",17.1546,104.1348],["นครพนม",17.3920,104.7696],
+  ["อุบลราชธานี",15.2447,104.8473],["ศรีสะเกษ",15.1186,104.3220],["มุกดาหาร",16.5453,104.7235],
+  ["ชลบุรี",13.3611,100.9847],["ระยอง",12.6814,101.2816],["จันทบุรี",12.6113,102.1039],
+  ["ตราด",12.2428,102.5175],["ชุมพร",10.4930,99.1800],["สุราษฎร์ธานี",9.1382,99.3217],
+  ["ภูเก็ต",7.8804,98.3923],["กระบี่",8.0863,98.9063],["นครศรีธรรมราช",8.4304,99.9631],
+  ["ตรัง",7.5563,99.6114],["สงขลา",7.1898,100.5954],["ปัตตานี",6.8695,101.2505],
+  ["ยะลา",6.5411,101.2804],["นราธิวาส",6.4255,101.8253]
+] as const;
+
+function weatherSignal(code: number, precipitation: number, gust: number) {
+  if ([95,96,99].includes(code)) return { type: "storm", severity: 3, label: "พายุฝนฟ้าคะนอง" };
+  if (precipitation >= 5 || [65,67,82].includes(code)) return { type: "heavy-rain", severity: 3, label: "ฝนหนัก" };
+  if (precipitation >= 0.5 || [61,63,80,81].includes(code)) return { type: "rain", severity: 2, label: "มีฝน" };
+  if (precipitation > 0 || [51,53,55,56,57].includes(code)) return { type: "drizzle", severity: 1, label: "ฝนเล็กน้อย" };
+  if (gust >= 45) return { type: "wind", severity: 2, label: "ลมกระโชกแรง" };
+  if ([1,2,3,45,48].includes(code)) return { type: "cloud", severity: 0, label: code >= 45 ? "หมอก/เมฆต่ำ" : "มีเมฆ" };
+  return { type: "clear", severity: 0, label: "สภาพอากาศปกติ" };
+}
+
+async function nationalSignals(ctx: any) {
+  const endpoint = new URL("https://api.open-meteo.com/v1/forecast");
+  endpoint.searchParams.set("latitude", WEATHER_POINTS.map(x => x[1]).join(","));
+  endpoint.searchParams.set("longitude", WEATHER_POINTS.map(x => x[2]).join(","));
+  endpoint.searchParams.set("timezone", "Asia/Bangkok");
+  endpoint.searchParams.set("current", "temperature_2m,precipitation,weather_code,wind_gusts_10m");
+  const raw = await cachedJson(endpoint.toString(), 300, ctx);
+  const rows = Array.isArray(raw) ? raw : [raw];
+
+  const features = WEATHER_POINTS.map((point, i) => {
+    const c = rows[i]?.current || {};
+    const code = Number(c.weather_code || 0);
+    const precipitation = Number(c.precipitation || 0);
+    const gust = Number(c.wind_gusts_10m || 0);
+    const signal = weatherSignal(code, precipitation, gust);
+    return {
+      type: "Feature",
+      geometry: { type: "Point", coordinates: [point[2], point[1]] },
+      properties: {
+        id: `weather-${i}`,
+        name: point[0],
+        kind: "weather-signal",
+        eventType: signal.type,
+        severity: signal.severity,
+        label: signal.label,
+        temperature: Number(c.temperature_2m || 0),
+        precipitation,
+        windGust: gust,
+        weatherCode: code,
+        observedAt: c.time || new Date().toISOString(),
+        source: "Open-Meteo",
+        fieldReport: false
+      }
+    };
+  });
+
+  const active = features.filter((f: any) => f.properties.severity > 0).length;
+  return json({
+    type: "FeatureCollection",
+    features,
+    meta: {
+      total: features.length,
+      active,
+      fieldReports: 0,
+      note: "Weather signals are model-derived and are not eyewitness reports.",
+      updatedAt: new Date().toISOString()
+    }
+  }, 200, 90);
+}
+
 async function satellite(ctx: any) {
   const endpoint = "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json";
   const data = await cachedJson(endpoint, 300, ctx);
@@ -166,6 +243,7 @@ export default {
       if (url.pathname === "/api/weather") return await weather(url, ctx);
       if (url.pathname === "/api/geocode") return await geocode(url, ctx);
       if (url.pathname === "/api/radar") return await radar(ctx);
+      if (url.pathname === "/api/signals") return await nationalSignals(ctx);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
     } catch (error: any) {
