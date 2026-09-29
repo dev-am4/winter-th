@@ -339,7 +339,7 @@ function findProvince(text: string) {
 function reportKind(text: string) {
   const t = text.toLowerCase();
   if (/น้ำป่า|flash flood|น้ำหลาก/.test(t)) return { eventType: "flash-flood", severity: 3, label: "น้ำป่า/น้ำหลาก" };
-  if (/น้ำท่วม|น้ำขัง|ท่วมหนัก|flood/.test(t)) return { eventType: "flood", severity: 3, label: "รายงานน้ำท่วม" };
+  if (/น้ำท่วม|น้ำขัง|ท่วมหนัก|อุทกภัย|flood/.test(t)) return { eventType: "flood", severity: 3, label: "รายงานน้ำท่วม" };
   if (/ดินถล่ม|landslide/.test(t)) return { eventType: "landslide", severity: 3, label: "เสี่ยงดินถล่ม" };
   if (/ฝนตกหนัก|ฝนหนัก|heavy rain/.test(t)) return { eventType: "heavy-rain-report", severity: 2, label: "รายงานฝนหนัก" };
   if (/พายุ|storm|ลมแรง/.test(t)) return { eventType: "storm-report", severity: 2, label: "รายงานพายุ/ลมแรง" };
@@ -423,11 +423,13 @@ async function publicReports(ctx: any) {
 
   const dwrUrl = "https://dwr.go.th/uploads/xml/rss_news_TH_2.xml";
   const tmdUrl = "https://tmd.go.th/api/xml/warning-news";
+  const prdUrl = "https://www.prd.go.th/th/rss/page/contentjson/id/142/cid/33";
   const gdeltUrl = "https://api.gdeltproject.org/api/v2/geo/geo?query=(flood%20OR%20flooding%20OR%20%22heavy%20rain%22%20OR%20landslide)%20sourcecountry:thailand&mode=pointdata&format=geojson&timespan=72h&maxpoints=120&geores=1&sortby=date";
 
-  const [dwrXml, tmdXml, gdelt] = await Promise.all([
+  const [dwrXml, tmdXml, prd, gdelt] = await Promise.all([
     cachedText(dwrUrl, 900, ctx).catch(() => ""),
     cachedText(tmdUrl, 1800, ctx).catch(() => ""),
+    cachedJson(prdUrl, 600, ctx).catch(() => null),
     cachedJson(gdeltUrl, 1800, ctx).catch(() => null)
   ]);
 
@@ -452,6 +454,24 @@ async function publicReports(ctx: any) {
       publishedAt: item.pubDate,
       image: item.image,
       description: item.description
+    });
+  }
+
+  for (const item of (prd?.items || []).slice(0, 40)) {
+    const html = String(item.content_html || "");
+    const rawImage = html.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || "";
+    const image = rawImage
+      ? (rawImage.startsWith("http") ? rawImage : `https://www.prd.go.th${rawImage.startsWith("/") ? "" : "/"}${rawImage}`)
+      : "";
+
+    add({
+      title: String(item.title || ""),
+      url: String(item.url || ""),
+      source: "กรมประชาสัมพันธ์",
+      sourceType: "official",
+      publishedAt: String(item.date_published || ""),
+      image,
+      description: stripHtml(html).slice(0, 4000)
     });
   }
 
@@ -500,7 +520,7 @@ async function publicReports(ctx: any) {
       news: deduped.filter((x) => x.sourceType === "news").length,
       locationAccuracy: "province-centroid",
       updatedAt: new Date().toISOString(),
-      sources: ["กรมทรัพยากรน้ำ", "กรมอุตุนิยมวิทยา", "GDELT DOC 2.0"]
+      sources: ["กรมทรัพยากรน้ำ", "กรมอุตุนิยมวิทยา", "กรมประชาสัมพันธ์", "GDELT GEO 2.0"]
     }
   }, 200, 180);
 }
