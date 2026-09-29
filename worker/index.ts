@@ -720,7 +720,12 @@ async function postsStats(env: Env) {
       SELECT status FROM post_submissions
     )
   `).all();
-  return json(q.results?.[0] || { total: 0, active: 0, pending: 0 }, 200, 30);
+  const row: any = q.results?.[0] || {};
+  return json({
+    total: Number(row.total || 0),
+    active: Number(row.active || 0),
+    pending: Number(row.pending || 0)
+  }, 200, 30);
 }
 
 async function youtubeDiscover(url: URL, env: Env) {
