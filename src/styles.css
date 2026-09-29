@@ -171,59 +171,6 @@ button:focus-visible,input:focus-visible { outline: 2px solid var(--accent); out
   box-shadow:0 45px 100px rgba(0,0,0,.27);
 }
 .national-map { position:absolute; inset:0; }
-.community-marker {
-  position:relative;
-  width:48px;
-  height:48px;
-  padding:0;
-  border:3px solid rgba(255,255,255,.94);
-  border-radius:15px 15px 15px 4px;
-  overflow:visible;
-  background:#123044;
-  box-shadow:0 8px 28px rgba(0,0,0,.36);
-  cursor:pointer;
-  transform:rotate(-2deg);
-}
-.community-marker::after {
-  content:"";
-  position:absolute;
-  left:5px;
-  bottom:-8px;
-  width:12px;
-  height:12px;
-  background:inherit;
-  border-left:3px solid rgba(255,255,255,.94);
-  border-bottom:3px solid rgba(255,255,255,.94);
-  transform:rotate(-45deg);
-  border-radius:0 0 0 3px;
-}
-.community-marker img {
-  position:absolute;
-  inset:0;
-  width:100%;
-  height:100%;
-  object-fit:cover;
-  border-radius:11px 11px 11px 1px;
-  overflow:hidden;
-}
-.community-marker > span {
-  position:absolute;
-  right:-6px;
-  top:-7px;
-  z-index:2;
-  min-width:19px;
-  height:19px;
-  padding:0 5px;
-  border-radius:999px;
-  display:grid;
-  place-items:center;
-  background:#78e3c0;
-  border:2px solid #06101a;
-  color:#06101a;
-  font-size:9px;
-  font-weight:700;
-}
-
 .map-vignette {
   position:absolute; inset:0; pointer-events:none;
   background:
@@ -286,26 +233,31 @@ button:focus-visible,input:focus-visible { outline: 2px solid var(--accent); out
 .dot.cluster { background:#d8f7ff; }
 
 .community-marker {
-  width:46px; height:46px; padding:0;
-  border-radius:13px;
-  border:2px solid rgba(255,255,255,.95);
+  width:28px; height:28px; padding:0;
+  border-radius:8px;
+  border:1.5px solid rgba(255,255,255,.92);
   background:#10202b;
-  box-shadow:0 8px 25px rgba(0,0,0,.38);
+  box-shadow:0 4px 14px rgba(0,0,0,.34);
   overflow:visible;
   cursor:pointer;
   position:relative;
+  transition:transform .14s ease, box-shadow .14s ease;
+}
+.community-marker:hover {
+  transform:scale(1.18);
+  box-shadow:0 6px 18px rgba(0,0,0,.42);
 }
 .community-marker img {
   width:100%; height:100%; object-fit:cover; display:block;
-  border-radius:10px;
+  border-radius:6px;
 }
 .community-marker > span {
-  position:absolute; right:-6px; bottom:-6px;
-  width:20px; height:20px; border-radius:50%;
+  position:absolute; right:-4px; bottom:-4px;
+  min-width:13px; height:13px; padding:0 3px; border-radius:999px;
   display:grid; place-items:center;
   background:#78e3c0; color:#06101a;
-  border:2px solid #06101a;
-  font-size:10px; font-weight:700;
+  border:1.5px solid #06101a;
+  font-size:7px; font-weight:700;
 }
 .community-media { border-color:rgba(120,227,192,.32); }
 .community-pill { border-color:rgba(120,227,192,.24)!important; }
@@ -372,7 +324,7 @@ button:focus-visible,input:focus-visible { outline: 2px solid var(--accent); out
 .submit-send:disabled { opacity:.38; cursor:not-allowed; }
 
 @media (max-width:620px) {
-  .community-marker { width:42px; height:42px; }
+  .community-marker { width:26px; height:26px; }
   .submit-place-row { grid-template-columns:1fr; }
   .submit-place-row > button { min-height:38px; justify-content:center; }
 }

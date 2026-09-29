@@ -27,5 +27,26 @@
 			"database_name": "winter-posts",
 			"database_id": "ebfeb908-d062-41ab-aba1-637d1bdb95d7"
 		}
-	]
+	],
+	"queues": {
+		"producers": [
+			{
+				"binding": "DISCOVERY_QUEUE",
+				"queue": "winter-discovery"
+			}
+		],
+		"consumers": [
+			{
+				"queue": "winter-discovery",
+				"max_batch_size": 10,
+				"max_batch_timeout": 5,
+				"max_retries": 2
+			}
+		]
+	},
+	"triggers": {
+		"crons": [
+			"*/15 * * * *"
+		]
+	}
 }

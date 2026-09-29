@@ -1,6 +1,6 @@
 import { PROVINCES } from "./provinces";
 
-type Env = { ASSETS: Fetcher; POSTS_DB: any; YOUTUBE_API_KEY?: string };
+type Env = { ASSETS: Fetcher; POSTS_DB: any; DISCOVERY_QUEUE?: any; BRAVE_SEARCH_API_KEY?: string; YOUTUBE_API_KEY?: string };
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -535,6 +535,7 @@ function postPlatform(sourceUrl: string) {
     if (host.endsWith("reddit.com")) return "reddit";
     if (host.endsWith("facebook.com")) return "facebook";
     if (host.endsWith("instagram.com")) return "instagram";
+    if (host.endsWith("lemon8-app.com") || host.endsWith("lemon8.com")) return "lemon8";
     return "web";
   } catch {
     return "unknown";
@@ -605,25 +606,25 @@ async function postsViewport(url: URL, env: Env) {
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
 
   if (zoom < 9) {
-    const cell = zoom <= 4 ? 1.5 : zoom <= 6 ? 0.65 : 0.24;
+    const gridColumn = zoom <= 4 ? "grid_z4" : zoom <= 6 ? "grid_z6" : "grid_z8";
     const q = await env.POSTS_DB.prepare(`
       SELECT
-        CAST(lon / ? AS INTEGER) AS gx,
-        CAST(lat / ? AS INTEGER) AS gy,
+        ${gridColumn} AS grid_key,
         COUNT(*) AS count,
         AVG(lon) AS lon,
         AVG(lat) AS lat,
-        MAX(COALESCE(posted_at, ingested_at)) AS latest_at,
+        MAX(observed_at) AS latest_at,
         MAX(thumbnail_url) AS sample_thumbnail
       FROM public_posts
       WHERE status = 'active'
         AND lon BETWEEN ? AND ?
         AND lat BETWEEN ? AND ?
-        AND COALESCE(posted_at, ingested_at) >= ?
-      GROUP BY gx, gy
+        AND observed_at >= ?
+        AND ${gridColumn} IS NOT NULL
+      GROUP BY ${gridColumn}
       ORDER BY count DESC
       LIMIT 900
-    `).bind(cell, cell, minLon, maxLon, minLat, maxLat, since).all();
+    `).bind(minLon, maxLon, minLat, maxLat, since).all();
 
     return json({
       mode: "clusters",
@@ -631,27 +632,27 @@ async function postsViewport(url: URL, env: Env) {
         type: "Feature",
         geometry: { type: "Point", coordinates: [Number(row.lon), Number(row.lat)] },
         properties: {
-          id: `post-cluster-${i}`,
+          id: `post-cluster-${row.grid_key || i}`,
           kind: "post-cluster",
           count: Number(row.count || 0),
           latestAt: row.latest_at,
           thumbnail: row.sample_thumbnail || ""
         }
       })),
-      meta: { zoom, hours }
+      meta: { zoom, hours, grid: gridColumn }
     }, 200, 30);
   }
 
   const q = await env.POSTS_DB.prepare(`
     SELECT id, platform, source_url, author_name, content, thumbnail_url, media_type,
            lat, lon, location_label, location_accuracy, event_type, confidence,
-           posted_at, ingested_at
+           posted_at, ingested_at, observed_at
     FROM public_posts
     WHERE status = 'active'
       AND lon BETWEEN ? AND ?
       AND lat BETWEEN ? AND ?
-      AND COALESCE(posted_at, ingested_at) >= ?
-    ORDER BY COALESCE(posted_at, ingested_at) DESC
+      AND observed_at >= ?
+    ORDER BY observed_at DESC
     LIMIT 250
   `).bind(minLon, maxLon, minLat, maxLat, since).all();
 
@@ -763,6 +764,171 @@ async function youtubeDiscover(url: URL, env: Env) {
   }, 200, 120);
 }
 
+
+function spatialGridKeys(lat: number, lon: number) {
+  const key = (scale: number) => `${Math.trunc(lon * scale)}:${Math.trunc(lat * scale)}`;
+  return {
+    gridZ4: key(2),
+    gridZ6: key(4),
+    gridZ8: key(16),
+    gridZ10: key(64)
+  };
+}
+
+function isLikelyPublicPostUrl(sourceUrl: string, platform: string) {
+  try {
+    const u = new URL(sourceUrl);
+    const p = u.pathname.toLowerCase();
+    if (platform === "youtube") return p === "/watch" || p.startsWith("/shorts/") || u.hostname === "youtu.be";
+    if (platform === "tiktok") return p.includes("/video/") || u.hostname.startsWith("notes.");
+    if (platform === "x") return p.includes("/status/");
+    if (platform === "reddit") return p.includes("/comments/");
+    if (platform === "instagram") return p.startsWith("/p/") || p.startsWith("/reel/");
+    if (platform === "facebook") return p.includes("/posts/") || p.includes("/reel/") || p.includes("/videos/") || u.searchParams.has("story_fbid");
+    if (platform === "lemon8") return p.length > 2;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+async function discoveryStatus(env: Env) {
+  const [q, c, p] = await Promise.all([
+    env.POSTS_DB.prepare(`SELECT COUNT(*) total, SUM(CASE WHEN enabled=1 THEN 1 ELSE 0 END) enabled FROM discovery_queries`).first(),
+    env.POSTS_DB.prepare(`SELECT COUNT(*) total, SUM(CASE WHEN status='new' THEN 1 ELSE 0 END) fresh FROM discovery_candidates`).first(),
+    env.POSTS_DB.prepare(`SELECT COUNT(*) total FROM public_posts WHERE status='active'`).first()
+  ]);
+  return json({
+    configured: Boolean(env.BRAVE_SEARCH_API_KEY),
+    queueConfigured: Boolean(env.DISCOVERY_QUEUE),
+    queries: { total: Number((q as any)?.total || 0), enabled: Number((q as any)?.enabled || 0) },
+    candidates: { total: Number((c as any)?.total || 0), fresh: Number((c as any)?.fresh || 0) },
+    activePosts: Number((p as any)?.total || 0)
+  }, 200, 20);
+}
+
+async function scheduleDiscovery(env: Env) {
+  if (!env.BRAVE_SEARCH_API_KEY || !env.DISCOVERY_QUEUE) return { queued: 0, reason: "SEARCH_KEY_OR_QUEUE_MISSING" };
+
+  const now = new Date().toISOString();
+  const due = await env.POSTS_DB.prepare(`
+    SELECT id, provider, query_text, province, lat, lon, freshness, priority
+    FROM discovery_queries
+    WHERE enabled=1 AND next_run_at <= ?
+    ORDER BY priority DESC, next_run_at ASC
+    LIMIT 12
+  `).bind(now).all();
+
+  const rows = due.results || [];
+  if (!rows.length) return { queued: 0 };
+
+  await env.DISCOVERY_QUEUE.sendBatch(rows.map((row: any) => ({
+    body: {
+      type: "search",
+      id: row.id,
+      provider: row.provider,
+      queryText: row.query_text,
+      province: row.province,
+      lat: Number(row.lat),
+      lon: Number(row.lon),
+      freshness: row.freshness || "pd"
+    }
+  })));
+
+  const holdUntil = new Date(Date.now() + 30 * 60_000).toISOString();
+  await env.POSTS_DB.batch(rows.map((row: any) =>
+    env.POSTS_DB.prepare(`UPDATE discovery_queries SET next_run_at=? WHERE id=?`).bind(holdUntil, row.id)
+  ));
+
+  return { queued: rows.length };
+}
+
+async function processDiscoverySearch(job: any, env: Env) {
+  if (!env.BRAVE_SEARCH_API_KEY) return { accepted: 0, reason: "BRAVE_SEARCH_API_KEY_REQUIRED" };
+
+  const endpoint = new URL("https://api.search.brave.com/res/v1/web/search");
+  endpoint.searchParams.set("q", String(job.queryText || "").slice(0, 500));
+  endpoint.searchParams.set("count", "20");
+  endpoint.searchParams.set("country", "TH");
+  endpoint.searchParams.set("search_lang", "th");
+  endpoint.searchParams.set("freshness", String(job.freshness || "pd"));
+
+  const response = await fetch(endpoint, {
+    headers: {
+      "accept": "application/json",
+      "x-subscription-token": env.BRAVE_SEARCH_API_KEY
+    }
+  });
+  if (!response.ok) throw new Error(`BRAVE_SEARCH_${response.status}`);
+
+  const data: any = await response.json();
+  const results = data?.web?.results || [];
+  const discoveredAt = new Date().toISOString();
+  const nextRunAt = new Date(Date.now() + 6 * 3600_000).toISOString();
+  let accepted = 0;
+
+  for (const result of results) {
+    const sourceUrl = String(result?.url || "").trim();
+    if (!sourceUrl) continue;
+    const platform = postPlatform(sourceUrl);
+    if (!isLikelyPublicPostUrl(sourceUrl, platform)) continue;
+
+    const title = stripHtml(String(result?.title || "")).slice(0, 800);
+    const snippet = stripHtml(String(result?.description || "")).slice(0, 1200);
+    const combined = `${job.queryText || ""} ${title} ${snippet}`;
+    const kind = reportKind(combined) || { eventType: "flood", severity: 2, label: "รายงานสถานการณ์" };
+    const thumbnail = String(result?.thumbnail?.src || result?.profile?.img || "").slice(0, 1500);
+    const candidateId = `brave-${reportHash(sourceUrl)}`;
+    const grids = spatialGridKeys(Number(job.lat), Number(job.lon));
+
+    await env.POSTS_DB.prepare(`
+      INSERT OR IGNORE INTO discovery_candidates
+        (id,query_id,provider,source_url,platform,title,snippet,thumbnail_url,province,lat,lon,discovered_at,status)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'new')
+    `).bind(
+      candidateId, String(job.id), "brave", sourceUrl, platform, title, snippet,
+      thumbnail, String(job.province || ""), Number(job.lat), Number(job.lon), discoveredAt
+    ).run();
+
+    const mediaType = platform === "youtube" || platform === "tiktok" || platform === "instagram" ? "video" : "post";
+    await env.POSTS_DB.prepare(`
+      INSERT OR IGNORE INTO public_posts
+        (id,platform,source_url,author_name,content,thumbnail_url,media_type,lat,lon,
+         location_label,location_accuracy,event_type,confidence,status,posted_at,ingested_at,updated_at,
+         observed_at,grid_z4,grid_z6,grid_z8,grid_z10)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',NULL,?,?,?,?,?,?,?,?)
+    `).bind(
+      candidateId, platform, sourceUrl, "", title || snippet, thumbnail, mediaType,
+      Number(job.lat), Number(job.lon), String(job.province || ""), "query-province",
+      kind.eventType, 0.58, discoveredAt, discoveredAt, discoveredAt,
+      grids.gridZ4, grids.gridZ6, grids.gridZ8, grids.gridZ10
+    ).run();
+
+    await env.POSTS_DB.prepare(`UPDATE discovery_candidates SET status='indexed' WHERE id=?`).bind(candidateId).run();
+    accepted++;
+  }
+
+  await env.POSTS_DB.prepare(`
+    UPDATE discovery_queries
+    SET last_run_at=?, next_run_at=?, last_result_count=?, freshness='pd'
+    WHERE id=?
+  `).bind(discoveredAt, nextRunAt, accepted, String(job.id)).run();
+
+  return { accepted };
+}
+
+async function consumeDiscoveryQueue(batch: any, env: Env) {
+  for (const message of batch.messages || []) {
+    try {
+      const job = message.body || {};
+      if (job.type === "search") await processDiscoverySearch(job, env);
+      if (typeof message.ack === "function") message.ack();
+    } catch (error) {
+      if (typeof message.retry === "function") message.retry();
+    }
+  }
+}
+
 async function satellite(ctx: any) {
   const endpoint = "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json";
   const data = await cachedJson(endpoint, 300, ctx);
@@ -792,6 +958,7 @@ export default {
       if (url.pathname === "/api/posts" && request.method === "GET") return await postsViewport(url, env);
       if (url.pathname === "/api/posts/submit" && request.method === "POST") return await submitPublicPost(request, env);
       if (url.pathname === "/api/posts/stats") return await postsStats(env);
+      if (url.pathname === "/api/discovery/status") return await discoveryStatus(env);
       if (url.pathname === "/api/posts/discover/youtube") return await youtubeDiscover(url, env);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
@@ -801,5 +968,13 @@ export default {
         message: error?.message || "Unknown upstream error"
       }, 502, 0);
     }
+  },
+
+  async scheduled(_event: any, env: Env, ctx: any) {
+    ctx.waitUntil(scheduleDiscovery(env));
+  },
+
+  async queue(batch: any, env: Env, _ctx: any) {
+    await consumeDiscoveryQueue(batch, env);
   }
 };

@@ -232,10 +232,10 @@ function NationalMap({
           filter: ["==", ["get", "kind"], "post-cluster"],
           paint: {
             "circle-color": "#78e3c0",
-            "circle-opacity": 0.96,
-            "circle-radius": ["step", ["get", "count"], 18, 10, 23, 50, 29, 200, 36],
-            "circle-stroke-color": "#06101a",
-            "circle-stroke-width": 4
+            "circle-opacity": 0.94,
+            "circle-radius": ["step", ["get", "count"], 10, 10, 12, 50, 15, 200, 18],
+            "circle-stroke-color": "rgba(6,16,26,.92)",
+            "circle-stroke-width": 2
           }
         });
 
