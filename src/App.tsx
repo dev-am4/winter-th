@@ -117,7 +117,7 @@ function NationalMap({
           layout: {
             "text-field": ["get", "point_count_abbreviated"],
             "text-size": 11,
-            "text-font": ["Open Sans Bold"]
+            "text-font": ["Noto Sans Regular"]
           },
           paint: { "text-color": "#07131f" }
         });
@@ -221,7 +221,7 @@ function NationalMap({
     let maxzoom = 7;
 
     if (overlay === "radar") {
-      tile = `${radar.host}${current.path}/256/{z}/{x}/{y}/4/1_1.png`;
+      tile = `${radar.host}${current.path}/256/{z}/{x}/{y}/2/1_0.png`;
       maxzoom = 7;
     } else {
       const p = overlay === "sat-rgb" ? satellite.products.rgb : satellite.products.ir;
@@ -239,7 +239,7 @@ function NationalMap({
         type: "raster",
         source: "weather-overlay",
         paint: {
-          "raster-opacity": overlay === "radar" ? 0.82 : 0.6,
+          "raster-opacity": overlay === "radar" ? 0.68 : 0.6,
           "raster-fade-duration": 0,
           "raster-saturation": overlay === "sat-ir" ? -0.75 : 0
         }
@@ -276,7 +276,7 @@ function App() {
   const [radar, setRadar] = useState<any>(null);
   const [satellite, setSatellite] = useState<any>(null);
   const [filter, setFilter] = useState<SignalFilter>("all");
-  const [overlay, setOverlay] = useState<OverlayMode>("radar");
+  const [overlay, setOverlay] = useState<OverlayMode>("none");
   const [playing, setPlaying] = useState(true);
   const [selected, setSelected] = useState<any>(null);
   const [focus, setFocus] = useState<FocusPoint>(null);
