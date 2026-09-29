@@ -1,3 +1,5 @@
+import { PROVINCES } from "./provinces";
+
 type Env = { ASSETS: Fetcher };
 
 const JSON_HEADERS = {
@@ -53,6 +55,28 @@ async function cachedJson(url: string, ttl: number, ctx: any) {
 
   ctx.waitUntil(cache.put(key, stored.clone()));
   return JSON.parse(body);
+}
+
+async function cachedText(url: string, ttl: number, ctx: any) {
+  const cache = (caches as unknown as { default: Cache }).default;
+  const key = new Request(url, { method: "GET" });
+  const hit = await cache.match(key);
+  if (hit) return hit.text();
+
+  const response = await fetch(url, {
+    headers: { "user-agent": "winter-th/0.1 public-situation-map" }
+  });
+  if (!response.ok) throw new Error(`Upstream ${response.status}: ${url}`);
+
+  const body = await response.text();
+  const stored = new Response(body, {
+    headers: {
+      "content-type": response.headers.get("content-type") || "text/plain; charset=utf-8",
+      "cache-control": `public, max-age=${ttl}`
+    }
+  });
+  ctx.waitUntil(cache.put(key, stored.clone()));
+  return body;
 }
 
 async function weather(url: URL, ctx: any) {
@@ -219,6 +243,246 @@ async function nationalSignals(ctx: any) {
   }, 200, 90);
 }
 
+
+type PublicReport = {
+  id: string;
+  title: string;
+  url: string;
+  source: string;
+  sourceType: "official" | "news";
+  publishedAt: string;
+  image?: string;
+  province: string;
+  lon: number;
+  lat: number;
+  eventType: string;
+  severity: number;
+  label: string;
+};
+
+function xmlValue(block: string, tag: string) {
+  const m = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, "i"));
+  if (!m) return "";
+  return m[1]
+    .replace(/^<!\[CDATA\[/, "")
+    .replace(/\]\]>$/, "")
+    .trim();
+}
+
+function decodeEntities(value: string) {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+}
+
+function stripHtml(value: string) {
+  return decodeEntities(value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function parseRss(xml: string) {
+  return [...xml.matchAll(/<item>([\s\S]*?)<\/item>/gi)].map((m) => {
+    const block = m[1];
+    const description = xmlValue(block, "description");
+    const enclosure = block.match(/<enclosure[^>]+url=["']([^"']+)["']/i)?.[1] || "";
+    const imageTag = xmlValue(block, "image");
+    const imageInHtml = description.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] || "";
+    const sourceBlock = block.match(/<source(?:\s+url=["']([^"']+)["'])?[^>]*>([\s\S]*?)<\/source>/i);
+    return {
+      title: stripHtml(xmlValue(block, "title")),
+      link: decodeEntities(stripHtml(xmlValue(block, "link"))),
+      guid: stripHtml(xmlValue(block, "guid")),
+      pubDate: stripHtml(xmlValue(block, "pubDate")),
+      description: stripHtml(description),
+      image: decodeEntities(imageTag || enclosure || imageInHtml),
+      source: sourceBlock ? stripHtml(sourceBlock[2]) : "",
+      sourceUrl: sourceBlock?.[1] || ""
+    };
+  });
+}
+
+function reportHash(input: string) {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+
+const PLACE_HINTS = [
+  { keys: ["กทม.", "กรุงเทพ", "บางกะปิ", "ลาดพร้าว", "ร่มเกล้า", "หลักสี่", "จตุจักร", "มีนบุรี", "หนองจอก", "ลาดกระบัง", "คลองสามวา"], province: "กรุงเทพมหานคร" },
+  { keys: ["บ้านค่าย"], province: "ระยอง" },
+  { keys: ["โคราช"], province: "นครราชสีมา" },
+  { keys: ["อยุธยา"], province: "พระนครศรีอยุธยา" }
+] as const;
+
+function findProvince(text: string) {
+  const normalized = text.toLowerCase();
+  for (const hint of PLACE_HINTS) {
+    if (hint.keys.some((x) => normalized.includes(x.toLowerCase()))) {
+      const p = PROVINCES.find((x) => x.th === hint.province);
+      if (p) return p;
+    }
+  }
+  for (const p of PROVINCES) {
+    const names = [p.th, p.en, ...p.aliases].filter(Boolean);
+    if (names.some((x) => normalized.includes(String(x).toLowerCase()))) return p;
+  }
+  return null;
+}
+
+function reportKind(text: string) {
+  const t = text.toLowerCase();
+  if (/น้ำป่า|flash flood|น้ำหลาก/.test(t)) return { eventType: "flash-flood", severity: 3, label: "น้ำป่า/น้ำหลาก" };
+  if (/น้ำท่วม|น้ำขัง|ท่วมหนัก|flood/.test(t)) return { eventType: "flood", severity: 3, label: "รายงานน้ำท่วม" };
+  if (/ดินถล่ม|landslide/.test(t)) return { eventType: "landslide", severity: 3, label: "เสี่ยงดินถล่ม" };
+  if (/ฝนตกหนัก|ฝนหนัก|heavy rain/.test(t)) return { eventType: "heavy-rain-report", severity: 2, label: "รายงานฝนหนัก" };
+  if (/พายุ|storm|ลมแรง/.test(t)) return { eventType: "storm-report", severity: 2, label: "รายงานพายุ/ลมแรง" };
+  return null;
+}
+
+function parseDate(value: string) {
+  const raw = (value || "").trim();
+  if (!raw) return null;
+
+  const gdelt = raw.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/);
+  if (gdelt) {
+    return new Date(Date.UTC(+gdelt[1], +gdelt[2] - 1, +gdelt[3], +gdelt[4], +gdelt[5], +gdelt[6]));
+  }
+
+  const thai = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})$/);
+  if (thai) {
+    let year = +thai[3];
+    if (year > 2400) year -= 543;
+    return new Date(`${year}-${String(+thai[2]).padStart(2, "0")}-${String(+thai[1]).padStart(2, "0")}T${String(+thai[4]).padStart(2, "0")}:${thai[5]}:${thai[6]}+07:00`);
+  }
+
+  const d = new Date(raw);
+  return Number.isFinite(d.getTime()) ? d : null;
+}
+
+function toFeature(r: PublicReport) {
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [r.lon, r.lat] },
+    properties: {
+      id: r.id,
+      name: r.province,
+      kind: "public-report",
+      eventType: r.eventType,
+      severity: r.severity,
+      label: r.label,
+      title: r.title,
+      source: r.source,
+      sourceType: r.sourceType,
+      sourceUrl: r.url,
+      image: r.image || "",
+      publishedAt: r.publishedAt,
+      fieldReport: true,
+      locationAccuracy: "province"
+    }
+  };
+}
+
+async function publicReports(ctx: any) {
+  const now = Date.now();
+  const maxAge = 72 * 60 * 60 * 1000;
+  const reports: PublicReport[] = [];
+
+  const add = (candidate: {
+    title: string; url: string; source: string; sourceType: "official" | "news";
+    publishedAt: string; image?: string; description?: string;
+  }) => {
+    if (!candidate.title || !candidate.url) return;
+    const date = parseDate(candidate.publishedAt);
+    if (!date || now - date.getTime() > maxAge || date.getTime() - now > 6 * 60 * 60 * 1000) return;
+    const text = `${candidate.title} ${candidate.description || ""}`;
+    const kind = reportKind(text);
+    const province = findProvince(text);
+    if (!kind || !province) return;
+    reports.push({
+      id: `report-${reportHash(candidate.url + candidate.title)}`,
+      title: candidate.title.slice(0, 240),
+      url: candidate.url,
+      source: candidate.source || "Public source",
+      sourceType: candidate.sourceType,
+      publishedAt: date?.toISOString() || new Date().toISOString(),
+      image: candidate.image,
+      province: province.th,
+      lon: province.lon,
+      lat: province.lat,
+      ...kind
+    });
+  };
+
+  const dwrUrl = "https://dwr.go.th/uploads/xml/rss_news_TH_2.xml";
+  const tmdUrl = "https://tmd.go.th/api/xml/warning-news";
+  const gdeltUrl = "https://api.gdeltproject.org/api/v2/doc/doc?query=(flood%20OR%20flooding%20OR%20%22heavy%20rain%22%20OR%20landslide)%20sourcecountry:thailand&mode=artlist&maxrecords=50&timespan=72h&sort=datedesc&format=json";
+
+  const [dwrXml, tmdXml, gdelt] = await Promise.all([
+    cachedText(dwrUrl, 900, ctx).catch(() => ""),
+    cachedText(tmdUrl, 1800, ctx).catch(() => ""),
+    cachedJson(gdeltUrl, 1800, ctx).catch(() => null)
+  ]);
+
+  for (const item of parseRss(dwrXml).slice(0, 80)) {
+    add({
+      title: item.title,
+      url: item.link,
+      source: "กรมทรัพยากรน้ำ",
+      sourceType: "official",
+      publishedAt: item.pubDate,
+      image: item.image,
+      description: item.description
+    });
+  }
+
+  for (const item of parseRss(tmdXml).slice(0, 30)) {
+    add({
+      title: item.title,
+      url: "https://www.tmd.go.th/warning-and-events",
+      source: "กรมอุตุนิยมวิทยา",
+      sourceType: "official",
+      publishedAt: item.pubDate,
+      image: item.image,
+      description: item.description
+    });
+  }
+
+  for (const article of (gdelt?.articles || []).slice(0, 60)) {
+    add({
+      title: String(article.title || ""),
+      url: String(article.url || ""),
+      source: String(article.domain || "GDELT news source"),
+      sourceType: "news",
+      publishedAt: String(article.seendate || ""),
+      image: String(article.socialimage || ""),
+      description: ""
+    });
+  }
+
+  const deduped = [...new Map(reports.map((r) => [r.id, r])).values()]
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt))
+    .slice(0, 120);
+
+  return json({
+    type: "FeatureCollection",
+    features: deduped.map(toFeature),
+    meta: {
+      total: deduped.length,
+      official: deduped.filter((x) => x.sourceType === "official").length,
+      news: deduped.filter((x) => x.sourceType === "news").length,
+      locationAccuracy: "province-centroid",
+      updatedAt: new Date().toISOString(),
+      sources: ["กรมทรัพยากรน้ำ", "กรมอุตุนิยมวิทยา", "GDELT DOC 2.0"]
+    }
+  }, 200, 180);
+}
+
 async function satellite(ctx: any) {
   const endpoint = "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json";
   const data = await cachedJson(endpoint, 300, ctx);
@@ -244,6 +508,7 @@ export default {
       if (url.pathname === "/api/geocode") return await geocode(url, ctx);
       if (url.pathname === "/api/radar") return await radar(ctx);
       if (url.pathname === "/api/signals") return await nationalSignals(ctx);
+      if (url.pathname === "/api/reports") return await publicReports(ctx);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
     } catch (error: any) {

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Activity, Cloud, CloudLightning, CloudRain, Compass, Droplets,
+  Activity, Cloud, CloudLightning, CloudRain, Compass, Droplets, ExternalLink,
   Layers3, LocateFixed, MapPinned, Pause, Play, Search, Wind, X
 } from "lucide-react";
 
@@ -195,13 +195,18 @@ function NationalMap({
           paint: {
             "circle-radius": ["interpolate", ["linear"], ["get", "severity"], 0, 6, 1, 8, 2, 10, 3, 12],
             "circle-color": [
-              "match", ["get", "eventType"],
-              "storm", "#ff6d8f",
-              "heavy-rain", "#ff9c6b",
-              "rain", "#70b7ff",
-              "drizzle", "#7fd6e7",
-              "wind", "#c49cff",
-              "#6f8190"
+              "case",
+              ["==", ["get", "fieldReport"], true],
+              ["match", ["get", "sourceType"], "official", "#ff5f78", "news", "#ffad63", "#78e3c0"],
+              [
+                "match", ["get", "eventType"],
+                "storm", "#ff6d8f",
+                "heavy-rain", "#ff9c6b",
+                "rain", "#70b7ff",
+                "drizzle", "#7fd6e7",
+                "wind", "#c49cff",
+                "#6f8190"
+              ]
             ],
             "circle-opacity": ["case", [">", ["get", "severity"], 0], 0.98, 0.64],
             "circle-stroke-color": "rgba(255,255,255,.9)",
@@ -338,6 +343,7 @@ function NationalMap({
 
 function App() {
   const [signals, setSignals] = useState<any>({ type: "FeatureCollection", features: [], meta: {} });
+  const [reports, setReports] = useState<any>({ type: "FeatureCollection", features: [], meta: {} });
   const [radar, setRadar] = useState<any>(null);
   const [satellite, setSatellite] = useState<any>(null);
   const [filter, setFilter] = useState<SignalFilter>("all");
@@ -353,10 +359,12 @@ function App() {
   useEffect(() => {
     Promise.all([
       fetch("/api/signals").then(r => r.json()),
+      fetch("/api/reports").then(r => r.json()).catch(() => ({ type: "FeatureCollection", features: [], meta: {} })),
       fetch("/api/radar").then(r => r.json()),
       fetch("/api/satellite").then(r => r.json())
-    ]).then(([s, r, sat]) => {
+    ]).then(([s, rep, r, sat]) => {
       setSignals(s);
+      setReports(rep);
       setRadar(r);
       setSatellite(sat);
     }).catch(() => {});
@@ -374,13 +382,20 @@ function App() {
     return () => { window.clearTimeout(id); ctrl.abort(); };
   }, [query]);
 
+  const combined = useMemo(() => ({
+    type: "FeatureCollection",
+    features: [...(signals.features || []), ...(reports.features || [])],
+    meta: {
+      weather: signals.meta || {},
+      reports: reports.meta || {}
+    }
+  }), [signals, reports]);
+
   const activeCount = useMemo(() =>
     (signals.features || []).filter((f: any) => Number(f.properties?.severity || 0) > 0).length
   , [signals]);
 
-  const rainCount = useMemo(() =>
-    (signals.features || []).filter((f: any) => ["storm","heavy-rain","rain","drizzle"].includes(f.properties?.eventType)).length
-  , [signals]);
+  const reportCount = reports.features?.length || 0;
 
   const topSignals = useMemo(() =>
     [...(signals.features || [])]
@@ -410,12 +425,7 @@ function App() {
 
   const openReports = () => {
     setFilter("reports");
-    setSelected({
-      reportsEmpty: true,
-      name: "LIVE REPORTS",
-      label: "ยังไม่มีรายงานภาคสนามที่เชื่อมเข้าระบบ",
-      detail: "Layer นี้เตรียมไว้สำหรับโพสต์/ข่าวสาธารณะและ Community Report โดยจะแยกจากสัญญาณโมเดลอากาศชัดเจน"
-    });
+    setSelected(null);
   };
 
   return (
@@ -435,9 +445,9 @@ function App() {
             <h1>ตอนนี้<br />ที่ไหนกำลังเกิดอะไร</h1>
           </div>
           <div className="national-stats">
-            <div><strong>{signals.meta?.total || 0}</strong><span>จุดทั่วประเทศ</span></div>
-            <div><strong>{activeCount}</strong><span>สัญญาณเด่น</span></div>
-            <div><strong>{rainCount}</strong><span>พื้นที่มีฝน</span></div>
+            <div><strong>{(signals.meta?.total || 0) + reportCount}</strong><span>จุดบนแผนที่</span></div>
+            <div><strong>{activeCount}</strong><span>สัญญาณอากาศเด่น</span></div>
+            <div><strong>{reportCount}</strong><span>LIVE REPORTS</span></div>
           </div>
         </div>
 
@@ -471,7 +481,7 @@ function App() {
 
         <div className="map-stage">
           <NationalMap
-            collection={signals}
+            collection={combined}
             filter={filter}
             overlay={overlay}
             radar={radar}
@@ -491,19 +501,35 @@ function App() {
           {selected && (
             <aside className="event-panel">
               <button className="panel-close" onClick={() => setSelected(null)}><X size={18} /></button>
-              {selected.reportsEmpty ? (
+              {selected.fieldReport ? (
                 <>
-                  <div className="event-kicker">FIELD REPORT LAYER</div>
+                  <div className="event-kicker">{selected.sourceType === "official" ? "OFFICIAL REPORT" : "PUBLIC NEWS REPORT"}</div>
                   <h2>{selected.name}</h2>
-                  <p>{selected.label}</p>
-                  <div className="empty-report-box">
-                    <MapPinned size={22} />
-                    <span>{selected.detail}</span>
+                  <div className="event-label">{selected.label}</div>
+                  {selected.image && (
+                    <div className="report-media">
+                      <img src={selected.image} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.parentElement!.style.display = "none"; }} />
+                    </div>
+                  )}
+                  <p className="report-title">{selected.title}</p>
+                  <div className="report-meta">
+                    <span>{selected.source || "Public source"}</span>
+                    <span>{selected.publishedAt ? timeLabel(selected.publishedAt) : "—"}</span>
+                    <span>ตำแหน่งระดับจังหวัด</span>
+                  </div>
+                  {selected.sourceUrl && (
+                    <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      เปิดต้นฉบับ <ExternalLink size={14} />
+                    </a>
+                  )}
+                  <div className="source-note">
+                    <MapPinned size={15} />
+                    <span>หมุดนี้อ้างอิงตำแหน่งจากชื่อจังหวัด/สถานที่ในข่าว ไม่ใช่ GPS ของผู้รายงาน</span>
                   </div>
                 </>
               ) : (
                 <>
-                  <div className="event-kicker">{selected.fieldReport ? "FIELD REPORT" : "WEATHER SIGNAL"}</div>
+                  <div className="event-kicker">WEATHER SIGNAL</div>
                   <h2>{selected.name}</h2>
                   <div className="event-label">{selected.label}</div>
                   <div className="event-metrics">
@@ -550,7 +576,7 @@ function App() {
         <span><CloudRain size={15} /> RainViewer Radar</span>
         <span><Cloud size={15} /> JMA Himawari-9</span>
         <span><Compass size={15} /> Open-Meteo weather signals</span>
-        <span><MapPinned size={15} /> Public reports layer ready</span>
+        <span><MapPinned size={15} /> LIVE REPORTS: DWR · TMD · GDELT</span>
       </section>
 
       {searchOpen && (
