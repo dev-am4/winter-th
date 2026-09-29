@@ -65,8 +65,12 @@ function NationalMap({
     let disposed = false;
     let localMap: any = null;
 
-    import("maplibre-gl").then(({ Map, NavigationControl, AttributionControl }) => {
+    Promise.all([
+      import("maplibre-gl"),
+      import("maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url")
+    ]).then(([{ Map, NavigationControl, AttributionControl, setWorkerUrl }, workerModule]) => {
       if (disposed || !hostRef.current || mapRef.current) return;
+      setWorkerUrl(workerModule.default);
       const map = new Map({
         container: hostRef.current,
         center: [100.75, 13.35],
