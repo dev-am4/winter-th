@@ -314,6 +314,37 @@ function reportHash(input: string) {
   return (h >>> 0).toString(36);
 }
 
+const SPECIFIC_PLACES = [
+  { keys: ["ปากช่อง"], province: "นครราชสีมา", label: "ปากช่อง", lat: 14.7080, lon: 101.4161 },
+  { keys: ["รังสิต"], province: "ปทุมธานี", label: "รังสิต", lat: 13.9877, lon: 100.6177 },
+  { keys: ["ลาดพร้าว"], province: "กรุงเทพมหานคร", label: "ลาดพร้าว", lat: 13.8060, lon: 100.5700 },
+  { keys: ["บางกะปิ"], province: "กรุงเทพมหานคร", label: "บางกะปิ", lat: 13.7650, lon: 100.6470 },
+  { keys: ["รามอินทรา"], province: "กรุงเทพมหานคร", label: "รามอินทรา", lat: 13.8360, lon: 100.6670 },
+  { keys: ["หลักสี่"], province: "กรุงเทพมหานคร", label: "หลักสี่", lat: 13.8870, lon: 100.5790 },
+  { keys: ["ดอนเมือง"], province: "กรุงเทพมหานคร", label: "ดอนเมือง", lat: 13.9130, lon: 100.5890 },
+  { keys: ["มีนบุรี"], province: "กรุงเทพมหานคร", label: "มีนบุรี", lat: 13.8130, lon: 100.7310 },
+  { keys: ["หนองจอก"], province: "กรุงเทพมหานคร", label: "หนองจอก", lat: 13.8550, lon: 100.8620 },
+  { keys: ["ลาดกระบัง"], province: "กรุงเทพมหานคร", label: "ลาดกระบัง", lat: 13.7230, lon: 100.7840 },
+  { keys: ["คลองสามวา"], province: "กรุงเทพมหานคร", label: "คลองสามวา", lat: 13.8590, lon: 100.7040 },
+  { keys: ["สายไหม"], province: "กรุงเทพมหานคร", label: "สายไหม", lat: 13.9210, lon: 100.6540 },
+  { keys: ["บางเขน"], province: "กรุงเทพมหานคร", label: "บางเขน", lat: 13.8730, lon: 100.5960 },
+  { keys: ["จตุจักร"], province: "กรุงเทพมหานคร", label: "จตุจักร", lat: 13.8280, lon: 100.5590 },
+  { keys: ["ห้วยขวาง"], province: "กรุงเทพมหานคร", label: "ห้วยขวาง", lat: 13.7760, lon: 100.5790 },
+  { keys: ["บางนา"], province: "กรุงเทพมหานคร", label: "บางนา", lat: 13.6680, lon: 100.6040 },
+  { keys: ["พระโขนง"], province: "กรุงเทพมหานคร", label: "พระโขนง", lat: 13.7020, lon: 100.6010 },
+  { keys: ["บางแค"], province: "กรุงเทพมหานคร", label: "บางแค", lat: 13.6960, lon: 100.4090 },
+  { keys: ["บางบอน"], province: "กรุงเทพมหานคร", label: "บางบอน", lat: 13.6590, lon: 100.3990 },
+  { keys: ["ทวีวัฒนา"], province: "กรุงเทพมหานคร", label: "ทวีวัฒนา", lat: 13.7880, lon: 100.3490 }
+] as const;
+
+function findSpecificPlace(text: string) {
+  const normalized = text.toLowerCase();
+  for (const place of SPECIFIC_PLACES) {
+    if (place.keys.some((key) => normalized.includes(key.toLowerCase()))) return place;
+  }
+  return null;
+}
+
 const PLACE_HINTS = [
   { keys: ["กทม.", "กรุงเทพ", "บางกะปิ", "ลาดพร้าว", "ร่มเกล้า", "หลักสี่", "จตุจักร", "มีนบุรี", "หนองจอก", "ลาดกระบัง", "คลองสามวา"], province: "กรุงเทพมหานคร" },
   { keys: ["บ้านค่าย"], province: "ระยอง" },
@@ -329,9 +360,21 @@ function findProvince(text: string) {
       if (p) return p;
     }
   }
+
+  const ambiguous = new Set(["เลย", "ตาก", "แพร่"]);
   for (const p of PROVINCES) {
     const names = [p.th, p.en, ...p.aliases].filter(Boolean);
-    if (names.some((x) => normalized.includes(String(x).toLowerCase()))) return p;
+    for (const rawName of names) {
+      const name = String(rawName).toLowerCase();
+      if (!ambiguous.has(String(p.th))) {
+        if (normalized.includes(name)) return p;
+        continue;
+      }
+
+      const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const explicit = new RegExp(`(?:จังหวัด|จ\\.?|#)\\s*${escaped}(?:\\s|$|[,.!?/])`, "i");
+      if (explicit.test(normalized)) return p;
+    }
   }
   return null;
 }
@@ -868,7 +911,7 @@ function publicEventScore(text: string, publishedAtMs: number, hasDetectedPlace:
   let score = 2;
   if (/(วันนี้|ตอนนี้|ล่าสุด|เมื่อกี้|เมื่อคืน|เช้านี้|เย็นนี้|สถานการณ์|น้ำเข้า|ท่วมแล้ว|ผ่านไม่ได้|รถเล็ก|ระดับน้ำ|น้ำสูง|น้ำรอระบาย|ฝนถล่ม|อ่วม|น้ำมาแล้ว|ขอความช่วยเหลือ|ติดอยู่)/i.test(t)) score += 3;
   if (hasDetectedPlace) score += 2;
-  if (/(วิธีรับมือ|เตรียมตัวก่อน|เช็กลิสต์|checklist|how to|วิธีป้องกัน|ควรเตรียม|ความรู้|ข้อควรรู้|รับมืออย่างไร)/i.test(t)) score -= 5;
+  if (/(วิธีรับมือ|วิธีเอาตัวรอด|เตรียมตัวก่อน|เช็กลิสต์|checklist|how to|วิธีป้องกัน|ควรเตรียม|ความรู้|ข้อควรรู้|รับมืออย่างไร|คู่มือ|เว็บเช็ค|แอปเช็ก)/i.test(t)) score -= 5;
 
   const age = Date.now() - publishedAtMs;
   if (age < -6 * 3600_000) return -99;
@@ -917,11 +960,13 @@ async function processLemon8Discovery(job: any, env: Env) {
     if (!Number.isFinite(publishedSec) || publishedSec <= 0) continue;
 
     const publishedMs = publishedSec * 1000;
+    const textPlace = findSpecificPlace(text);
+    const queryPlace = findSpecificPlace(queryText);
     const detectedProvince = findProvince(text);
-    const location = detectedProvince || queryProvince;
+    const location = textPlace || detectedProvince || queryPlace || queryProvince;
     if (!location) continue;
 
-    const score = publicEventScore(text, publishedMs, Boolean(detectedProvince));
+    const score = publicEventScore(text, publishedMs, Boolean(textPlace || detectedProvince));
     if (score < 5) continue;
 
     const kind = reportKind(text) || { eventType: "flood", severity: 2, label: "รายงานสถานการณ์" };
@@ -936,11 +981,18 @@ async function processLemon8Discovery(job: any, env: Env) {
     const lat = Number(location.lat);
     const lon = Number(location.lon);
     const grids = spatialGridKeys(lat, lon);
-    const confidence = detectedProvince ? Math.min(0.95, 0.72 + score * 0.025) : Math.min(0.78, 0.52 + score * 0.025);
+    const confidence = textPlace
+      ? Math.min(0.97, 0.80 + score * 0.02)
+      : detectedProvince
+        ? Math.min(0.93, 0.70 + score * 0.022)
+        : queryPlace
+          ? Math.min(0.78, 0.56 + score * 0.02)
+          : Math.min(0.70, 0.48 + score * 0.02);
     const content = (title || shortContent || supplement).slice(0, 1400);
     const authorName = String(author?.nickName || article?.author?.nickName || "").slice(0, 200);
     const mediaType = String(article?.articleClass || "").toLowerCase().includes("video") ? "video" : "image";
-    const locationAccuracy = detectedProvince ? "text-province" : "query-province";
+    const locationAccuracy = textPlace ? "text-place" : detectedProvince ? "text-province" : queryPlace ? "query-place" : "query-province";
+    const locationLabel = String((textPlace || queryPlace)?.label || (location as any).th || job.province || "");
 
     statements.push(
       env.POSTS_DB.prepare(`
@@ -950,7 +1002,7 @@ async function processLemon8Discovery(job: any, env: Env) {
       `).bind(
         candidateId, String(job.id), "lemon8", sourceUrl, "lemon8",
         title.slice(0, 800), shortContent.slice(0, 1200), thumbnail,
-        String(location.th || job.province || ""), lat, lon, discoveredAt
+        locationLabel, lat, lon, discoveredAt
       ),
       env.POSTS_DB.prepare(`
         INSERT OR IGNORE INTO public_posts
@@ -960,7 +1012,7 @@ async function processLemon8Discovery(job: any, env: Env) {
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?)
       `).bind(
         candidateId, "lemon8", sourceUrl, authorName, content, thumbnail, mediaType,
-        lat, lon, String(location.th || job.province || ""), locationAccuracy,
+        lat, lon, locationLabel, locationAccuracy,
         kind.eventType, confidence, postedAt, discoveredAt, discoveredAt, postedAt,
         grids.gridZ4, grids.gridZ6, grids.gridZ8, grids.gridZ10
       )
