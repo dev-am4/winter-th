@@ -585,7 +585,9 @@ function postFeature(row: any) {
       locationAccuracy: row.location_accuracy || "approximate",
       eventType: row.event_type || "flood",
       confidence: Number(row.confidence || 0.5),
-      postedAt: row.posted_at || row.ingested_at,
+      postedAt: row.posted_at || "",
+      detectedAt: row.ingested_at,
+      timeKind: row.posted_at ? "published" : "detected",
       severity: 3,
       label: row.event_type === "flood" ? "โพสต์น้ำท่วม" : "โพสต์จากพื้นที่"
     }

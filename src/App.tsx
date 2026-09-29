@@ -721,7 +721,7 @@ function App() {
                   <div className="report-meta">
                     {selected.authorName && <span>{selected.authorName}</span>}
                     <span>{selected.platform || "web"}</span>
-                    <span>{selected.postedAt ? timeLabel(selected.postedAt) : "ล่าสุด"}</span>
+                    <span>{selected.timeKind === "published" && selected.postedAt ? timeLabel(selected.postedAt) : "พบในระบบล่าสุด"}</span>
                     <span>{selected.locationAccuracy || "approximate"}</span>
                   </div>
                   {selected.sourceUrl && (
