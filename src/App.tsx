@@ -78,7 +78,67 @@ function NationalMap({
         minZoom: 4,
         maxZoom: 12,
         attributionControl: false,
-        style: "https://tiles.openfreemap.org/styles/dark"
+        style: {
+          version: 8,
+          glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+          sources: {
+            region: {
+              type: "geojson",
+              data: "/data/region-countries.geojson",
+              attribution: "Natural Earth"
+            },
+            provinces: {
+              type: "geojson",
+              data: "/data/thailand-provinces.geojson",
+              attribution: "Thailand ADM1 polygons · CC BY 4.0"
+            }
+          },
+          layers: [
+            {
+              id: "background",
+              type: "background",
+              paint: { "background-color": "#06101a" }
+            },
+            {
+              id: "region-fill",
+              type: "fill",
+              source: "region",
+              paint: {
+                "fill-color": "#0d1b25",
+                "fill-opacity": 0.92
+              }
+            },
+            {
+              id: "region-line",
+              type: "line",
+              source: "region",
+              paint: {
+                "line-color": "#243846",
+                "line-width": 0.8,
+                "line-opacity": 0.8
+              }
+            },
+            {
+              id: "thailand-fill",
+              type: "fill",
+              source: "provinces",
+              paint: {
+                "fill-color": "#143347",
+                "fill-opacity": 0.84
+              }
+            },
+            {
+              id: "province-lines",
+              type: "line",
+              source: "provinces",
+              paint: {
+                "line-color": "#4f7185",
+                "line-width": ["interpolate", ["linear"], ["zoom"], 4, 0.45, 8, 1.2],
+                "line-opacity": 0.72
+              }
+            }
+          ]
+        } as any
       });
 
       map.addControl(new NavigationControl({ visualizePitch: false }), "bottom-right");
@@ -86,6 +146,11 @@ function NationalMap({
 
       map.on("load", () => {
         if (disposed) return;
+
+        map.fitBounds([[97.0, 5.2], [106.0, 20.7]], {
+          padding: 28,
+          duration: 0
+        });
 
         map.addSource("signals", {
           type: "geojson",
