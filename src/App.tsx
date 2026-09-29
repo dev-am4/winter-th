@@ -271,7 +271,7 @@ function NationalMap({
           const params = new URLSearchParams({
             bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
             zoom: String(zoom),
-            hours: "168"
+            hours: filterRef.current === "community" ? "720" : "168"
           });
 
           try {

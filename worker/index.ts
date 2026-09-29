@@ -1,6 +1,6 @@
 import { PROVINCES } from "./provinces";
 
-type Env = { ASSETS: Fetcher; POSTS_DB: any; DISCOVERY_QUEUE?: any; BRAVE_SEARCH_API_KEY?: string; YOUTUBE_API_KEY?: string };
+type Env = { ASSETS: Fetcher; POSTS_DB: any; DISCOVERY_QUEUE?: any; DISCOVERY_ADMIN_TOKEN?: string; BRAVE_SEARCH_API_KEY?: string; YOUTUBE_API_KEY?: string };
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -808,7 +808,7 @@ async function discoveryStatus(env: Env) {
 }
 
 async function scheduleDiscovery(env: Env) {
-  if (!env.BRAVE_SEARCH_API_KEY || !env.DISCOVERY_QUEUE) return { queued: 0, reason: "SEARCH_KEY_OR_QUEUE_MISSING" };
+  if (!env.DISCOVERY_QUEUE) return { queued: 0, reason: "QUEUE_MISSING" };
 
   const now = new Date().toISOString();
   const due = await env.POSTS_DB.prepare(`
@@ -816,11 +816,14 @@ async function scheduleDiscovery(env: Env) {
     FROM discovery_queries
     WHERE enabled=1 AND next_run_at <= ?
     ORDER BY priority DESC, next_run_at ASC
-    LIMIT 12
+    LIMIT 60
   `).bind(now).all();
 
-  const rows = due.results || [];
-  if (!rows.length) return { queued: 0 };
+  const rows = (due.results || [])
+    .filter((row: any) => row.provider !== "brave" || Boolean(env.BRAVE_SEARCH_API_KEY))
+    .slice(0, 12);
+
+  if (!rows.length) return { queued: 0, reason: "NO_RUNNABLE_QUERY" };
 
   await env.DISCOVERY_QUEUE.sendBatch(rows.map((row: any) => ({
     body: {
@@ -840,7 +843,142 @@ async function scheduleDiscovery(env: Env) {
     env.POSTS_DB.prepare(`UPDATE discovery_queries SET next_run_at=? WHERE id=?`).bind(holdUntil, row.id)
   ));
 
-  return { queued: rows.length };
+  return { queued: rows.length, providers: [...new Set(rows.map((x: any) => x.provider))] };
+}
+
+
+function parseLemon8Discover(html: string) {
+  const items: any[] = [];
+  const re = /<script type="application\/json" remix-suspense-replace="\d+">([\s\S]*?)<\/script>/g;
+  for (const match of html.matchAll(re)) {
+    try {
+      const payload: any = JSON.parse(match[1]);
+      const data = payload?.args?.[2];
+      const found = data?.article_v2?.items;
+      if (Array.isArray(found)) items.push(...found);
+    } catch {}
+  }
+  return items;
+}
+
+function publicEventScore(text: string, publishedAtMs: number, hasDetectedPlace: boolean) {
+  const t = text.toLowerCase();
+  if (!/(น้ำท่วม|น้ำขัง|น้ำป่า|น้ำหลาก|ฝนตกหนัก|ฝนหนัก|พายุ|ดินถล่ม|น้ำล้น|รถผ่านไม่ได้)/i.test(t)) return -99;
+
+  let score = 2;
+  if (/(วันนี้|ตอนนี้|ล่าสุด|เมื่อกี้|เมื่อคืน|เช้านี้|เย็นนี้|สถานการณ์|น้ำเข้า|ท่วมแล้ว|ผ่านไม่ได้|รถเล็ก|ระดับน้ำ|น้ำสูง|น้ำรอระบาย|ฝนถล่ม|อ่วม|น้ำมาแล้ว|ขอความช่วยเหลือ|ติดอยู่)/i.test(t)) score += 3;
+  if (hasDetectedPlace) score += 2;
+  if (/(วิธีรับมือ|เตรียมตัวก่อน|เช็กลิสต์|checklist|how to|วิธีป้องกัน|ควรเตรียม|ความรู้|ข้อควรรู้|รับมืออย่างไร)/i.test(t)) score -= 5;
+
+  const age = Date.now() - publishedAtMs;
+  if (age < -6 * 3600_000) return -99;
+  if (age <= 3 * 86400_000) score += 3;
+  else if (age <= 7 * 86400_000) score += 2;
+  else if (age <= 30 * 86400_000) score += 1;
+  else return -99;
+
+  return score;
+}
+
+async function processLemon8Discovery(job: any, env: Env) {
+  const queryText = String(job.queryText || "").trim().slice(0, 120);
+  if (!queryText) return { accepted: 0, reason: "EMPTY_QUERY" };
+
+  const endpoint = `https://www.lemon8-app.com/discover/${encodeURIComponent(queryText)}?region=th`;
+  const response = await fetch(endpoint, {
+    headers: {
+      "user-agent": "Mozilla/5.0 (compatible; winter-th/0.2; +https://www.dev2u.online/)",
+      "accept": "text/html,application/xhtml+xml"
+    }
+  });
+  if (!response.ok) throw new Error(`LEMON8_DISCOVER_${response.status}`);
+
+  const html = await response.text();
+  const rawItems = parseLemon8Discover(html);
+  const discoveredAt = new Date().toISOString();
+  const nextRunAt = new Date(Date.now() + 6 * 3600_000).toISOString();
+  const queryProvince = PROVINCES.find((x: any) => x.th === String(job.province || ""));
+  const statements: any[] = [];
+  let accepted = 0;
+
+  for (const wrapper of rawItems.slice(0, 48)) {
+    const article = wrapper?.article || {};
+    const author = wrapper?.author || article?.author || {};
+    const groupId = String(article?.groupId || "").trim();
+    const linkName = String(author?.linkName || article?.author?.linkName || "").trim();
+    if (!groupId || !linkName) continue;
+
+    const title = stripHtml(String(article?.title || "")).trim();
+    const shortContent = stripHtml(String(article?.shortContent || "")).trim();
+    const supplement = stripHtml(String(wrapper?.gptInfo?.supplements || "")).slice(0, 2400);
+    const ocr = Array.isArray(article?.ocrText) ? article.ocrText.join(" ") : "";
+    const text = [title, shortContent, supplement, ocr].filter(Boolean).join(" ");
+    const publishedSec = Number(article?.publishTime || 0);
+    if (!Number.isFinite(publishedSec) || publishedSec <= 0) continue;
+
+    const publishedMs = publishedSec * 1000;
+    const detectedProvince = findProvince(text);
+    const location = detectedProvince || queryProvince;
+    if (!location) continue;
+
+    const score = publicEventScore(text, publishedMs, Boolean(detectedProvince));
+    if (score < 5) continue;
+
+    const kind = reportKind(text) || { eventType: "flood", severity: 2, label: "รายงานสถานการณ์" };
+    const sourceUrl = `https://notes.tiktok.com/@${encodeURIComponent(linkName)}/${groupId}?region=th`;
+    const thumbnail = String(
+      article?.imageList?.[0]?.shareCardCoverImage ||
+      article?.imageList?.[0]?.url ||
+      ""
+    ).slice(0, 1800);
+    const postedAt = new Date(publishedMs).toISOString();
+    const candidateId = `lemon8-${groupId}`;
+    const lat = Number(location.lat);
+    const lon = Number(location.lon);
+    const grids = spatialGridKeys(lat, lon);
+    const confidence = detectedProvince ? Math.min(0.95, 0.72 + score * 0.025) : Math.min(0.78, 0.52 + score * 0.025);
+    const content = (title || shortContent || supplement).slice(0, 1400);
+    const authorName = String(author?.nickName || article?.author?.nickName || "").slice(0, 200);
+    const mediaType = String(article?.articleClass || "").toLowerCase().includes("video") ? "video" : "image";
+    const locationAccuracy = detectedProvince ? "text-province" : "query-province";
+
+    statements.push(
+      env.POSTS_DB.prepare(`
+        INSERT OR IGNORE INTO discovery_candidates
+          (id,query_id,provider,source_url,platform,title,snippet,thumbnail_url,province,lat,lon,discovered_at,status)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'indexed')
+      `).bind(
+        candidateId, String(job.id), "lemon8", sourceUrl, "lemon8",
+        title.slice(0, 800), shortContent.slice(0, 1200), thumbnail,
+        String(location.th || job.province || ""), lat, lon, discoveredAt
+      ),
+      env.POSTS_DB.prepare(`
+        INSERT OR IGNORE INTO public_posts
+          (id,platform,source_url,author_name,content,thumbnail_url,media_type,lat,lon,
+           location_label,location_accuracy,event_type,confidence,status,posted_at,ingested_at,updated_at,
+           observed_at,grid_z4,grid_z6,grid_z8,grid_z10)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?)
+      `).bind(
+        candidateId, "lemon8", sourceUrl, authorName, content, thumbnail, mediaType,
+        lat, lon, String(location.th || job.province || ""), locationAccuracy,
+        kind.eventType, confidence, postedAt, discoveredAt, discoveredAt, postedAt,
+        grids.gridZ4, grids.gridZ6, grids.gridZ8, grids.gridZ10
+      )
+    );
+    accepted++;
+    if (accepted >= 24) break;
+  }
+
+  statements.push(
+    env.POSTS_DB.prepare(`
+      UPDATE discovery_queries
+      SET last_run_at=?, next_run_at=?, last_result_count=?, freshness='pd'
+      WHERE id=?
+    `).bind(discoveredAt, nextRunAt, accepted, String(job.id))
+  );
+
+  if (statements.length) await env.POSTS_DB.batch(statements);
+  return { accepted, scanned: rawItems.length };
 }
 
 async function processDiscoverySearch(job: any, env: Env) {
@@ -921,12 +1059,35 @@ async function consumeDiscoveryQueue(batch: any, env: Env) {
   for (const message of batch.messages || []) {
     try {
       const job = message.body || {};
-      if (job.type === "search") await processDiscoverySearch(job, env);
+      if (job.type === "search") {
+        if (job.provider === "lemon8") await processLemon8Discovery(job, env);
+        else await processDiscoverySearch(job, env);
+      }
       if (typeof message.ack === "function") message.ack();
     } catch (error) {
       if (typeof message.retry === "function") message.retry();
     }
   }
+}
+
+async function kickDiscovery(request: Request, env: Env) {
+  const expected = env.DISCOVERY_ADMIN_TOKEN || "";
+  const supplied = request.headers.get("authorization") || "";
+  if (!expected || supplied !== `Bearer ${expected}`) {
+    return json({ error: "UNAUTHORIZED" }, 401, 0);
+  }
+
+  const url = new URL(request.url);
+  const rounds = Math.max(1, Math.min(8, Number(url.searchParams.get("rounds") || 1)));
+  const runs: any[] = [];
+  let queued = 0;
+  for (let i = 0; i < rounds; i++) {
+    const result = await scheduleDiscovery(env);
+    runs.push(result);
+    queued += Number(result?.queued || 0);
+    if (!result?.queued) break;
+  }
+  return json({ ok: true, queued, runs }, 200, 0);
 }
 
 async function satellite(ctx: any) {
@@ -959,6 +1120,7 @@ export default {
       if (url.pathname === "/api/posts/submit" && request.method === "POST") return await submitPublicPost(request, env);
       if (url.pathname === "/api/posts/stats") return await postsStats(env);
       if (url.pathname === "/api/discovery/status") return await discoveryStatus(env);
+      if (url.pathname === "/api/discovery/kick" && request.method === "POST") return await kickDiscovery(request, env);
       if (url.pathname === "/api/posts/discover/youtube") return await youtubeDiscover(url, env);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
