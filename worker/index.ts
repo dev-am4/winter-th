@@ -251,6 +251,7 @@ type PublicReport = {
   source: string;
   sourceType: "official" | "news";
   publishedAt: string;
+  timeKind?: "published" | "detected";
   image?: string;
   province: string;
   lon: number;
@@ -382,6 +383,7 @@ function toFeature(r: PublicReport) {
       sourceUrl: r.url,
       image: r.image || "",
       publishedAt: r.publishedAt,
+      timeKind: r.timeKind || "published",
       fieldReport: true,
       locationAccuracy: "province"
     }
@@ -421,7 +423,7 @@ async function publicReports(ctx: any) {
 
   const dwrUrl = "https://dwr.go.th/uploads/xml/rss_news_TH_2.xml";
   const tmdUrl = "https://tmd.go.th/api/xml/warning-news";
-  const gdeltUrl = "https://api.gdeltproject.org/api/v2/doc/doc?query=(flood%20OR%20flooding%20OR%20%22heavy%20rain%22%20OR%20landslide)%20sourcecountry:thailand&mode=artlist&maxrecords=50&timespan=72h&sort=datedesc&format=json";
+  const gdeltUrl = "https://api.gdeltproject.org/api/v2/geo/geo?query=(flood%20OR%20flooding%20OR%20%22heavy%20rain%22%20OR%20landslide)%20sourcecountry:thailand&mode=pointdata&format=geojson&timespan=72h&maxpoints=120&geores=1&sortby=date";
 
   const [dwrXml, tmdXml, gdelt] = await Promise.all([
     cachedText(dwrUrl, 900, ctx).catch(() => ""),
@@ -453,15 +455,35 @@ async function publicReports(ctx: any) {
     });
   }
 
-  for (const article of (gdelt?.articles || []).slice(0, 60)) {
-    add({
-      title: String(article.title || ""),
-      url: String(article.url || ""),
-      source: String(article.domain || "GDELT news source"),
+  for (const feature of (gdelt?.features || []).slice(0, 120)) {
+    const coordinates = feature?.geometry?.coordinates || [];
+    const lon = Number(coordinates[0]);
+    const lat = Number(coordinates[1]);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat) || lon < 97 || lon > 106.5 || lat < 5 || lat > 21) continue;
+
+    const props = feature?.properties || {};
+    const html = String(props.html || "");
+    const anchor = html.match(/href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/i);
+    const url = decodeEntities(anchor?.[1] || "");
+    const title = stripHtml(anchor?.[2] || props.name || "รายงานสถานการณ์จากข่าว");
+    const kind = reportKind(`${title} ${html}`) || { eventType: "flood", severity: 2, label: "รายงานสถานการณ์" };
+    const sourceHost = (() => {
+      try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "GDELT news source"; }
+    })();
+
+    reports.push({
+      id: `report-geo-${reportHash(`${lon},${lat},${url},${props.name || ""}`)}`,
+      title: title.slice(0, 240),
+      url: url || "https://www.gdeltproject.org/",
+      source: sourceHost,
       sourceType: "news",
-      publishedAt: String(article.seendate || ""),
-      image: String(article.socialimage || ""),
-      description: ""
+      publishedAt: new Date().toISOString(),
+      timeKind: "detected",
+      image: String(props.shareimage || ""),
+      province: String(props.name || "จุดรายงาน"),
+      lon,
+      lat,
+      ...kind
     });
   }
 

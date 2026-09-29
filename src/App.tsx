@@ -514,7 +514,7 @@ function App() {
                   <p className="report-title">{selected.title}</p>
                   <div className="report-meta">
                     <span>{selected.source || "Public source"}</span>
-                    <span>{selected.publishedAt ? timeLabel(selected.publishedAt) : "—"}</span>
+                    <span>{selected.timeKind === "detected" ? "พบในรอบล่าสุด" : selected.publishedAt ? timeLabel(selected.publishedAt) : "—"}</span>
                     <span>ตำแหน่งระดับจังหวัด</span>
                   </div>
                   {selected.sourceUrl && (
