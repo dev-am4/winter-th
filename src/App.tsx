@@ -49,6 +49,7 @@ function WeatherMap({
   const mapRef = useRef<any>(null);
   const markerRef = useRef<any>(null);
   const [frame, setFrame] = useState(0);
+  const [mapReady, setMapReady] = useState(false);
 
   const frames = mode === "radar" ? (radar?.frames || []) : (satellite?.frames || []);
 
@@ -84,6 +85,9 @@ function WeatherMap({
       markerRef.current = new maplibregl.Marker({ color: "#8ef6ff" }).setLngLat([coords.lon, coords.lat]).addTo(map);
       localMap = map;
       mapRef.current = map;
+      map.on("load", () => {
+        if (!disposed) setMapReady(true);
+      });
     });
 
     return () => {
@@ -110,7 +114,7 @@ function WeatherMap({
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map || !frames.length) return;
+    if (!mapReady || !map || !frames.length) return;
     const current = frames[Math.min(frame, frames.length - 1)];
     let tile = "";
     let maxzoom = 7;
@@ -148,7 +152,7 @@ function WeatherMap({
 
     if (map.isStyleLoaded()) apply();
     else map.once("load", apply);
-  }, [mode, frame, radar, satellite, frames.length]);
+  }, [mapReady, mode, frame, radar, satellite, frames.length]);
 
   const frameLabel = useMemo(() => {
     const f = frames[Math.min(frame, Math.max(0, frames.length - 1))];
