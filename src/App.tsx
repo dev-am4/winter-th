@@ -65,37 +65,20 @@ function NationalMap({
     let disposed = false;
     let localMap: any = null;
 
-    import("maplibre-gl").then((maplibregl) => {
+    import("maplibre-gl").then(({ Map, NavigationControl, AttributionControl }) => {
       if (disposed || !hostRef.current || mapRef.current) return;
-      const map = new maplibregl.Map({
+      const map = new Map({
         container: hostRef.current,
         center: [100.75, 13.35],
         zoom: 4.55,
         minZoom: 4,
         maxZoom: 12,
         attributionControl: false,
-        style: {
-          version: 8,
-          glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
-          sources: {
-            base: {
-              type: "raster",
-              tiles: ["https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png"],
-              tileSize: 256,
-              attribution: "© OpenStreetMap © CARTO"
-            }
-          },
-          layers: [{
-            id: "base",
-            type: "raster",
-            source: "base",
-            paint: { "raster-opacity": 0.82, "raster-saturation": -0.2 }
-          }]
-        } as any
+        style: "https://tiles.openfreemap.org/styles/dark"
       });
 
-      map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "bottom-right");
-      map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-left");
+      map.addControl(new NavigationControl({ visualizePitch: false }), "bottom-right");
+      map.addControl(new AttributionControl({ compact: true }), "bottom-left");
 
       map.on("load", () => {
         if (disposed) return;
