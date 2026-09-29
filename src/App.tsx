@@ -492,10 +492,19 @@ function App() {
           />
 
           <div className="legend">
-            <span><i className="dot storm" /> พายุ</span>
-            <span><i className="dot rain" /> ฝน</span>
-            <span><i className="dot wind" /> ลมแรง</span>
-            <span><i className="dot normal" /> ปกติ/เมฆ</span>
+            {filter === "reports" ? (
+              <>
+                <span><i className="dot official" /> Official report</span>
+                <span><i className="dot news" /> ข่าวสาธารณะ</span>
+              </>
+            ) : (
+              <>
+                <span><i className="dot storm" /> พายุ</span>
+                <span><i className="dot rain" /> ฝน</span>
+                <span><i className="dot wind" /> ลมแรง</span>
+                <span><i className="dot normal" /> ปกติ/เมฆ</span>
+              </>
+            )}
           </div>
 
           {selected && (
@@ -576,7 +585,7 @@ function App() {
         <span><CloudRain size={15} /> RainViewer Radar</span>
         <span><Cloud size={15} /> JMA Himawari-9</span>
         <span><Compass size={15} /> Open-Meteo weather signals</span>
-        <span><MapPinned size={15} /> LIVE REPORTS: DWR · TMD · GDELT</span>
+        <span><MapPinned size={15} /> LIVE REPORTS: DWR · TMD · PRD · GDELT</span>
       </section>
 
       {searchOpen && (

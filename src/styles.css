@@ -222,6 +222,8 @@ button:focus-visible,input:focus-visible { outline: 2px solid var(--accent); out
 .dot.rain { background:#70b7ff; }
 .dot.wind { background:#c49cff; }
 .dot.normal { background:#6f8190; }
+.dot.official { background:#ff5f78; }
+.dot.news { background:#ffad63; }
 
 .event-panel {
   position:absolute;
