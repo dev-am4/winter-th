@@ -1,6 +1,7 @@
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
 	"name": "winter-th",
+	"workers_dev": true,
 	"compatibility_date": "2026-09-29",
 	"main": "./worker/index.ts",
 	"assets": {
@@ -20,12 +21,6 @@
 		"enabled": true,
 		"head_sampling_rate": 0.05
 	},
-	"routes": [
-		{
-			"pattern": "www.dev2u.online",
-			"custom_domain": true
-		}
-	],
 	"d1_databases": [
 		{
 			"binding": "POSTS_DB",
