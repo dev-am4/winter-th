@@ -65,7 +65,7 @@ function NationalMap({
     let disposed = false;
     let localMap: any = null;
 
-    import("maplibre-gl").then(({ default: maplibregl }) => {
+    import("maplibre-gl").then((maplibregl) => {
       if (disposed || !hostRef.current || mapRef.current) return;
       const map = new maplibregl.Map({
         container: hostRef.current,
