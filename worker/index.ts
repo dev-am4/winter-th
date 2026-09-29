@@ -1,6 +1,6 @@
 import { PROVINCES } from "./provinces";
 
-type Env = { ASSETS: Fetcher };
+type Env = { ASSETS: Fetcher; POSTS_DB: any; YOUTUBE_API_KEY?: string };
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -525,6 +525,237 @@ async function publicReports(ctx: any) {
   }, 200, 180);
 }
 
+
+function postPlatform(sourceUrl: string) {
+  try {
+    const host = new URL(sourceUrl).hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "youtu.be" || host.endsWith("youtube.com")) return "youtube";
+    if (host.endsWith("tiktok.com")) return "tiktok";
+    if (host === "x.com" || host.endsWith("twitter.com")) return "x";
+    if (host.endsWith("reddit.com")) return "reddit";
+    if (host.endsWith("facebook.com")) return "facebook";
+    if (host.endsWith("instagram.com")) return "instagram";
+    return "web";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function oembedForUrl(sourceUrl: string, platform: string) {
+  try {
+    let endpoint = "";
+    if (platform === "youtube") {
+      endpoint = `https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(sourceUrl)}`;
+    } else if (platform === "tiktok") {
+      endpoint = `https://www.tiktok.com/oembed?url=${encodeURIComponent(sourceUrl)}`;
+    } else if (platform === "x") {
+      endpoint = `https://publish.twitter.com/oembed?omit_script=1&dnt=1&url=${encodeURIComponent(sourceUrl)}`;
+    }
+    if (!endpoint) return null;
+    const r = await fetch(endpoint, { headers: { "user-agent": "winter-th/0.1 public-post-index" } });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch {
+    return null;
+  }
+}
+
+function clampNumber(value: unknown, min: number, max: number) {
+  const x = Number(value);
+  if (!Number.isFinite(x)) return null;
+  return Math.max(min, Math.min(max, x));
+}
+
+function postFeature(row: any) {
+  return {
+    type: "Feature",
+    geometry: { type: "Point", coordinates: [Number(row.lon), Number(row.lat)] },
+    properties: {
+      id: row.id,
+      kind: "community-post",
+      fieldReport: true,
+      sourceType: "community",
+      platform: row.platform,
+      sourceUrl: row.source_url,
+      authorName: row.author_name || "",
+      title: row.content || "",
+      thumbnail: row.thumbnail_url || "",
+      mediaType: row.media_type || "post",
+      locationLabel: row.location_label || "",
+      locationAccuracy: row.location_accuracy || "approximate",
+      eventType: row.event_type || "flood",
+      confidence: Number(row.confidence || 0.5),
+      postedAt: row.posted_at || row.ingested_at,
+      severity: 3,
+      label: row.event_type === "flood" ? "โพสต์น้ำท่วม" : "โพสต์จากพื้นที่"
+    }
+  };
+}
+
+async function postsViewport(url: URL, env: Env) {
+  const bbox = (url.searchParams.get("bbox") || "97,5,106.5,21").split(",").map(Number);
+  if (bbox.length !== 4 || bbox.some(x => !Number.isFinite(x))) {
+    return json({ error: "BAD_BBOX" }, 400, 0);
+  }
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const zoom = Math.max(3, Math.min(14, Number(url.searchParams.get("zoom") || 5)));
+  const hours = Math.max(1, Math.min(720, Number(url.searchParams.get("hours") || 168)));
+  const since = new Date(Date.now() - hours * 3600_000).toISOString();
+
+  if (zoom < 9) {
+    const cell = zoom <= 4 ? 1.5 : zoom <= 6 ? 0.65 : 0.24;
+    const q = await env.POSTS_DB.prepare(`
+      SELECT
+        CAST(lon / ? AS INTEGER) AS gx,
+        CAST(lat / ? AS INTEGER) AS gy,
+        COUNT(*) AS count,
+        AVG(lon) AS lon,
+        AVG(lat) AS lat,
+        MAX(COALESCE(posted_at, ingested_at)) AS latest_at,
+        MAX(thumbnail_url) AS sample_thumbnail
+      FROM public_posts
+      WHERE status = 'active'
+        AND lon BETWEEN ? AND ?
+        AND lat BETWEEN ? AND ?
+        AND COALESCE(posted_at, ingested_at) >= ?
+      GROUP BY gx, gy
+      ORDER BY count DESC
+      LIMIT 900
+    `).bind(cell, cell, minLon, maxLon, minLat, maxLat, since).all();
+
+    return json({
+      mode: "clusters",
+      features: (q.results || []).map((row: any, i: number) => ({
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [Number(row.lon), Number(row.lat)] },
+        properties: {
+          id: `post-cluster-${i}`,
+          kind: "post-cluster",
+          count: Number(row.count || 0),
+          latestAt: row.latest_at,
+          thumbnail: row.sample_thumbnail || ""
+        }
+      })),
+      meta: { zoom, hours }
+    }, 200, 30);
+  }
+
+  const q = await env.POSTS_DB.prepare(`
+    SELECT id, platform, source_url, author_name, content, thumbnail_url, media_type,
+           lat, lon, location_label, location_accuracy, event_type, confidence,
+           posted_at, ingested_at
+    FROM public_posts
+    WHERE status = 'active'
+      AND lon BETWEEN ? AND ?
+      AND lat BETWEEN ? AND ?
+      AND COALESCE(posted_at, ingested_at) >= ?
+    ORDER BY COALESCE(posted_at, ingested_at) DESC
+    LIMIT 250
+  `).bind(minLon, maxLon, minLat, maxLat, since).all();
+
+  return json({
+    mode: "points",
+    features: (q.results || []).map(postFeature),
+    meta: { zoom, hours, returned: q.results?.length || 0 }
+  }, 200, 20);
+}
+
+async function submitPublicPost(request: Request, env: Env) {
+  const body: any = await request.json().catch(() => null);
+  if (!body) return json({ error: "BAD_JSON" }, 400, 0);
+
+  const sourceUrl = String(body.url || "").trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(sourceUrl);
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("bad");
+  } catch {
+    return json({ error: "BAD_URL" }, 400, 0);
+  }
+
+  const lat = clampNumber(body.lat, 5, 21);
+  const lon = clampNumber(body.lon, 97, 106.5);
+  if (lat == null || lon == null) return json({ error: "BAD_LOCATION" }, 400, 0);
+
+  const platform = postPlatform(sourceUrl);
+  const meta: any = await oembedForUrl(sourceUrl, platform);
+  const title = String(body.note || meta?.title || "").trim().slice(0, 1200);
+  const thumbnail = String(meta?.thumbnail_url || "").slice(0, 1500);
+  const author = String(meta?.author_name || "").slice(0, 200);
+  const now = new Date().toISOString();
+  const id = crypto.randomUUID();
+
+  await env.POSTS_DB.prepare(`
+    INSERT INTO post_submissions
+      (id, source_url, platform, lat, lon, location_label, submitted_note, submitted_at, status)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+  `).bind(
+    id, sourceUrl, platform, lat, lon,
+    String(body.locationLabel || "").slice(0, 240),
+    title, now
+  ).run();
+
+  return json({
+    ok: true,
+    id,
+    status: "pending",
+    preview: {
+      platform,
+      title,
+      thumbnail,
+      author
+    }
+  }, 201, 0);
+}
+
+async function postsStats(env: Env) {
+  const q = await env.POSTS_DB.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN status='active' THEN 1 ELSE 0 END) AS active,
+      SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending
+    FROM (
+      SELECT status FROM public_posts
+      UNION ALL
+      SELECT status FROM post_submissions
+    )
+  `).all();
+  return json(q.results?.[0] || { total: 0, active: 0, pending: 0 }, 200, 30);
+}
+
+async function youtubeDiscover(url: URL, env: Env) {
+  if (!env.YOUTUBE_API_KEY) {
+    return json({ error: "YOUTUBE_API_KEY_REQUIRED", enabled: false }, 503, 0);
+  }
+  const q = (url.searchParams.get("q") || "น้ำท่วม").slice(0, 80);
+  const publishedAfter = new Date(Date.now() - 48 * 3600_000).toISOString();
+  const endpoint = new URL("https://www.googleapis.com/youtube/v3/search");
+  endpoint.searchParams.set("part", "snippet");
+  endpoint.searchParams.set("type", "video");
+  endpoint.searchParams.set("maxResults", "25");
+  endpoint.searchParams.set("order", "date");
+  endpoint.searchParams.set("regionCode", "TH");
+  endpoint.searchParams.set("relevanceLanguage", "th");
+  endpoint.searchParams.set("publishedAfter", publishedAfter);
+  endpoint.searchParams.set("q", q);
+  endpoint.searchParams.set("key", env.YOUTUBE_API_KEY);
+  const r = await fetch(endpoint);
+  if (!r.ok) return json({ error: "YOUTUBE_UPSTREAM", status: r.status }, 502, 0);
+  const data: any = await r.json();
+  return json({
+    enabled: true,
+    items: (data.items || []).map((x: any) => ({
+      id: x.id?.videoId,
+      title: x.snippet?.title,
+      description: x.snippet?.description,
+      channelTitle: x.snippet?.channelTitle,
+      publishedAt: x.snippet?.publishedAt,
+      thumbnail: x.snippet?.thumbnails?.medium?.url || x.snippet?.thumbnails?.default?.url,
+      url: x.id?.videoId ? `https://www.youtube.com/watch?v=${x.id.videoId}` : ""
+    }))
+  }, 200, 120);
+}
+
 async function satellite(ctx: any) {
   const endpoint = "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json";
   const data = await cachedJson(endpoint, 300, ctx);
@@ -551,6 +782,10 @@ export default {
       if (url.pathname === "/api/radar") return await radar(ctx);
       if (url.pathname === "/api/signals") return await nationalSignals(ctx);
       if (url.pathname === "/api/reports") return await publicReports(ctx);
+      if (url.pathname === "/api/posts" && request.method === "GET") return await postsViewport(url, env);
+      if (url.pathname === "/api/posts/submit" && request.method === "POST") return await submitPublicPost(request, env);
+      if (url.pathname === "/api/posts/stats") return await postsStats(env);
+      if (url.pathname === "/api/posts/discover/youtube") return await youtubeDiscover(url, env);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
     } catch (error: any) {

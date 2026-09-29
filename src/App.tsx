@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity, Cloud, CloudLightning, CloudRain, Compass, Droplets, ExternalLink,
-  Layers3, LocateFixed, MapPinned, Pause, Play, Search, Wind, X
+  Layers3, LocateFixed, MapPinned, Pause, Play, Plus, Search, Send, Users, Wind, X
 } from "lucide-react";
 
 type OverlayMode = "none" | "radar" | "sat-ir" | "sat-rgb";
-type SignalFilter = "all" | "active" | "rain" | "wind" | "reports";
+type SignalFilter = "all" | "active" | "rain" | "wind" | "reports" | "community";
 type FocusPoint = { lon: number; lat: number; zoom?: number } | null;
 
 function jmaDate(stamp: string) {
@@ -32,6 +32,7 @@ function filterFeatures(collection: any, filter: SignalFilter) {
   const source = collection?.features || [];
   if (filter === "all") return source;
   if (filter === "reports") return source.filter((f: any) => f.properties?.fieldReport);
+  if (filter === "community") return [];
   if (filter === "active") return source.filter((f: any) => Number(f.properties?.severity || 0) > 0);
   if (filter === "rain") return source.filter((f: any) => ["storm","heavy-rain","rain","drizzle"].includes(f.properties?.eventType));
   if (filter === "wind") return source.filter((f: any) => f.properties?.eventType === "wind");
@@ -46,8 +47,13 @@ function NationalMap({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<any>(null);
+  const postMarkersRef = useRef<any[]>([]);
+  const refreshPostsRef = useRef<null | (() => void)>(null);
+  const filterRef = useRef<SignalFilter>(filter);
   const [mapReady, setMapReady] = useState(false);
   const [frame, setFrame] = useState(0);
+
+  filterRef.current = filter;
 
   const visibleCollection = useMemo(() => ({
     type: "FeatureCollection",
@@ -68,7 +74,7 @@ function NationalMap({
     Promise.all([
       import("maplibre-gl"),
       import("maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url")
-    ]).then(([{ Map, NavigationControl, AttributionControl, setWorkerUrl }, workerModule]) => {
+    ]).then(([{ Map, Marker, NavigationControl, AttributionControl, setWorkerUrl }, workerModule]) => {
       if (disposed || !hostRef.current || mapRef.current) return;
       setWorkerUrl(workerModule.default);
       const map = new Map({
@@ -214,6 +220,112 @@ function NationalMap({
           }
         });
 
+        map.addSource("community-posts", {
+          type: "geojson",
+          data: { type: "FeatureCollection", features: [] }
+        });
+
+        map.addLayer({
+          id: "community-clusters",
+          type: "circle",
+          source: "community-posts",
+          filter: ["==", ["get", "kind"], "post-cluster"],
+          paint: {
+            "circle-color": "#78e3c0",
+            "circle-opacity": 0.96,
+            "circle-radius": ["step", ["get", "count"], 18, 10, 23, 50, 29, 200, 36],
+            "circle-stroke-color": "#06101a",
+            "circle-stroke-width": 4
+          }
+        });
+
+        map.addLayer({
+          id: "community-cluster-count",
+          type: "symbol",
+          source: "community-posts",
+          filter: ["==", ["get", "kind"], "post-cluster"],
+          layout: {
+            "text-field": ["to-string", ["get", "count"]],
+            "text-size": 11,
+            "text-font": ["Noto Sans Regular"]
+          },
+          paint: { "text-color": "#06101a" }
+        });
+
+        const clearPostMarkers = () => {
+          for (const marker of postMarkersRef.current) marker.remove();
+          postMarkersRef.current = [];
+        };
+
+        const refreshCommunityPosts = async () => {
+          const show = ["all", "reports", "community"].includes(filterRef.current);
+          const postSource: any = map.getSource("community-posts");
+          if (!show || !postSource) {
+            clearPostMarkers();
+            postSource?.setData({ type: "FeatureCollection", features: [] });
+            return;
+          }
+
+          const bounds = map.getBounds();
+          const zoom = map.getZoom();
+          const params = new URLSearchParams({
+            bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
+            zoom: String(zoom),
+            hours: "168"
+          });
+
+          try {
+            const response = await fetch(`/api/posts?${params.toString()}`);
+            if (!response.ok) return;
+            const payload = await response.json();
+            clearPostMarkers();
+
+            if (payload.mode === "clusters") {
+              postSource.setData({ type: "FeatureCollection", features: payload.features || [] });
+              return;
+            }
+
+            postSource.setData({ type: "FeatureCollection", features: [] });
+            for (const feature of (payload.features || []).slice(0, 120)) {
+              const props = feature.properties || {};
+              const [lon, lat] = feature.geometry?.coordinates || [];
+              if (!Number.isFinite(Number(lon)) || !Number.isFinite(Number(lat))) continue;
+
+              const el = document.createElement("button");
+              el.type = "button";
+              el.className = "community-marker";
+              el.title = props.title || props.locationLabel || "โพสต์จากพื้นที่";
+
+              if (props.thumbnail) {
+                const img = document.createElement("img");
+                img.src = props.thumbnail;
+                img.alt = "";
+                img.loading = "lazy";
+                img.referrerPolicy = "no-referrer";
+                img.onerror = () => { img.style.display = "none"; };
+                el.appendChild(img);
+              }
+
+              const badge = document.createElement("span");
+              badge.textContent = props.platform === "youtube" ? "▶" : props.platform === "tiktok" ? "♪" : "●";
+              el.appendChild(badge);
+
+              el.addEventListener("click", (event) => {
+                event.stopPropagation();
+                onSelect({ ...props, coordinates: [lon, lat], communityPost: true });
+              });
+
+              const marker = new Marker({ element: el, anchor: "bottom" })
+                .setLngLat([Number(lon), Number(lat)])
+                .addTo(map);
+              postMarkersRef.current.push(marker);
+            }
+          } catch {}
+        };
+
+        refreshPostsRef.current = refreshCommunityPosts;
+        map.on("moveend", refreshCommunityPosts);
+
         map.on("click", "clusters", async (e: any) => {
           const features = map.queryRenderedFeatures(e.point, { layers: ["clusters"] });
           const clusterId = features?.[0]?.properties?.cluster_id;
@@ -225,6 +337,16 @@ function NationalMap({
           } catch {}
         });
 
+        map.on("click", "community-clusters", (e: any) => {
+          const feature = e.features?.[0];
+          if (!feature) return;
+          map.easeTo({
+            center: feature.geometry.coordinates,
+            zoom: Math.min(12, map.getZoom() + 2),
+            duration: 650
+          });
+        });
+
         map.on("click", "signal-points", (e: any) => {
           const feature = e.features?.[0];
           if (!feature) return;
@@ -233,7 +355,7 @@ function NationalMap({
           map.easeTo({ center: coordinates, zoom: Math.max(map.getZoom(), 7), duration: 600 });
         });
 
-        for (const layer of ["clusters", "signal-points"]) {
+        for (const layer of ["clusters", "signal-points", "community-clusters"]) {
           map.on("mouseenter", layer, () => { map.getCanvas().style.cursor = "pointer"; });
           map.on("mouseleave", layer, () => { map.getCanvas().style.cursor = ""; });
         }
@@ -241,11 +363,14 @@ function NationalMap({
         localMap = map;
         mapRef.current = map;
         setMapReady(true);
+        refreshCommunityPosts();
       });
     });
 
     return () => {
       disposed = true;
+      for (const marker of postMarkersRef.current) marker.remove();
+      postMarkersRef.current = [];
       localMap?.remove();
       mapRef.current = null;
     };
@@ -255,7 +380,8 @@ function NationalMap({
     if (!mapReady) return;
     const source: any = mapRef.current?.getSource("signals");
     source?.setData(visibleCollection);
-  }, [mapReady, visibleCollection]);
+    refreshPostsRef.current?.();
+  }, [mapReady, visibleCollection, filter]);
 
   useEffect(() => {
     if (!mapReady || !focus) return;
@@ -347,7 +473,7 @@ function App() {
   const [radar, setRadar] = useState<any>(null);
   const [satellite, setSatellite] = useState<any>(null);
   const [filter, setFilter] = useState<SignalFilter>("all");
-  const [overlay, setOverlay] = useState<OverlayMode>("none");
+  const [overlay, setOverlay] = useState<OverlayMode>("sat-rgb");
   const [playing, setPlaying] = useState(true);
   const [selected, setSelected] = useState<any>(null);
   const [focus, setFocus] = useState<FocusPoint>(null);
@@ -355,18 +481,28 @@ function App() {
   const [results, setResults] = useState<any[]>([]);
   const [searchOpen, setSearchOpen] = useState(false);
   const [locating, setLocating] = useState(false);
+  const [postStats, setPostStats] = useState<any>({ total: 0, active: 0, pending: 0 });
+  const [submitOpen, setSubmitOpen] = useState(false);
+  const [submitUrl, setSubmitUrl] = useState("");
+  const [submitNote, setSubmitNote] = useState("");
+  const [submitPlace, setSubmitPlace] = useState("");
+  const [submitPlaces, setSubmitPlaces] = useState<any[]>([]);
+  const [submitCoords, setSubmitCoords] = useState<any>(null);
+  const [submitState, setSubmitState] = useState<"idle" | "sending" | "sent" | "error">("idle");
 
   useEffect(() => {
     Promise.all([
       fetch("/api/signals").then(r => r.json()),
       fetch("/api/reports").then(r => r.json()).catch(() => ({ type: "FeatureCollection", features: [], meta: {} })),
       fetch("/api/radar").then(r => r.json()),
-      fetch("/api/satellite").then(r => r.json())
-    ]).then(([s, rep, r, sat]) => {
+      fetch("/api/satellite").then(r => r.json()),
+      fetch("/api/posts/stats").then(r => r.json()).catch(() => ({ total: 0, active: 0, pending: 0 }))
+    ]).then(([s, rep, r, sat, ps]) => {
       setSignals(s);
       setReports(rep);
       setRadar(r);
       setSatellite(sat);
+      setPostStats(ps);
     }).catch(() => {});
   }, []);
 
@@ -381,6 +517,21 @@ function App() {
     }, 250);
     return () => { window.clearTimeout(id); ctrl.abort(); };
   }, [query]);
+
+  useEffect(() => {
+    if (!submitOpen || submitCoords || submitPlace.trim().length < 2) {
+      setSubmitPlaces([]);
+      return;
+    }
+    const ctrl = new AbortController();
+    const id = window.setTimeout(() => {
+      fetch(`/api/geocode?q=${encodeURIComponent(submitPlace.trim())}`, { signal: ctrl.signal })
+        .then(r => r.json())
+        .then(x => setSubmitPlaces((x.results || []).filter((r: any) => r.country_code === "TH" || r.country === "ประเทศไทย" || r.country === "Thailand").slice(0, 5)))
+        .catch(() => {});
+    }, 280);
+    return () => { window.clearTimeout(id); ctrl.abort(); };
+  }, [submitOpen, submitPlace, submitCoords]);
 
   const combined = useMemo(() => ({
     type: "FeatureCollection",
@@ -428,11 +579,47 @@ function App() {
     setSelected(null);
   };
 
+  const submitPost = async () => {
+    if (!submitUrl.trim() || !submitCoords) return;
+    setSubmitState("sending");
+    try {
+      const r = await fetch("/api/posts/submit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: submitUrl.trim(),
+          note: submitNote.trim(),
+          lat: submitCoords.lat,
+          lon: submitCoords.lon,
+          locationLabel: submitCoords.label || submitPlace.trim()
+        })
+      });
+      if (!r.ok) throw new Error("submit failed");
+      const result = await r.json();
+      setSubmitState("sent");
+      setPostStats((s: any) => ({ ...s, pending: Number(s.pending || 0) + 1, total: Number(s.total || 0) + 1 }));
+      if (result?.preview?.title && !submitNote) setSubmitNote(result.preview.title);
+    } catch {
+      setSubmitState("error");
+    }
+  };
+
+  const resetSubmit = () => {
+    setSubmitOpen(false);
+    setSubmitUrl("");
+    setSubmitNote("");
+    setSubmitPlace("");
+    setSubmitPlaces([]);
+    setSubmitCoords(null);
+    setSubmitState("idle");
+  };
+
   return (
     <main className="app">
       <header className="topbar">
         <div className="brand"><span>W</span><div><strong>WINTER</strong><small>LIVE WEATHER MAP</small></div></div>
         <div className="top-actions">
+          <button className="glass-button submit-trigger" onClick={() => setSubmitOpen(true)}><Plus size={17} /><span>เพิ่มโพสต์</span></button>
           <button className="glass-button" onClick={() => setSearchOpen(true)}><Search size={17} /><span>ค้นหาพื้นที่</span></button>
           <button className="glass-button" onClick={locate}><LocateFixed size={17} className={locating ? "spin" : ""} /><span>ตำแหน่งฉัน</span></button>
         </div>
@@ -445,9 +632,10 @@ function App() {
             <h1>ตอนนี้<br />ที่ไหนกำลังเกิดอะไร</h1>
           </div>
           <div className="national-stats">
-            <div><strong>{(signals.meta?.total || 0) + reportCount}</strong><span>จุดบนแผนที่</span></div>
+            <div><strong>{(signals.meta?.total || 0) + reportCount + Number(postStats.active || 0)}</strong><span>จุดบนแผนที่</span></div>
             <div><strong>{activeCount}</strong><span>สัญญาณอากาศเด่น</span></div>
-            <div><strong>{reportCount}</strong><span>LIVE REPORTS</span></div>
+            <div><strong>{reportCount}</strong><span>รายงาน/ข่าว</span></div>
+            <div><strong>{Number(postStats.active || 0)}</strong><span>โพสต์ประชาชน</span></div>
           </div>
         </div>
 
@@ -460,6 +648,9 @@ function App() {
               <button className={filter === "rain" ? "active" : ""} onClick={() => { setFilter("rain"); setSelected(null); }}><Droplets size={14} /> ฝน</button>
               <button className={filter === "wind" ? "active" : ""} onClick={() => { setFilter("wind"); setSelected(null); }}><Wind size={14} /> ลม</button>
               <button className={filter === "reports" ? "active report-pill" : "report-pill"} onClick={openReports}><MapPinned size={14} /> LIVE REPORTS</button>
+              <button className={filter === "community" ? "active community-pill" : "community-pill"} onClick={() => { setFilter("community"); setSelected(null); }}><Users size={14} /> POSTS คนทั่วไป</button>
+              <button className={filter === "community" ? "active community-pill" : "community-pill"} onClick={() => { setFilter("community"); setSelected(null); }}><Users size={14} /> โพสต์ประชาชน</button>
+              <button className="submit-pill" onClick={() => setSubmitOpen(true)}><Plus size={14} /> เพิ่มโพสต์</button>
             </div>
           </div>
 
@@ -492,10 +683,16 @@ function App() {
           />
 
           <div className="legend">
-            {filter === "reports" ? (
+            {filter === "community" ? (
+              <>
+                <span><i className="dot community" /> โพสต์ประชาชน</span>
+                <span>ซูมเข้าเพื่อดู thumbnail</span>
+              </>
+            ) : filter === "reports" ? (
               <>
                 <span><i className="dot official" /> Official report</span>
                 <span><i className="dot news" /> ข่าวสาธารณะ</span>
+                <span><i className="dot community" /> โพสต์ประชาชน</span>
               </>
             ) : (
               <>
@@ -510,7 +707,34 @@ function App() {
           {selected && (
             <aside className="event-panel">
               <button className="panel-close" onClick={() => setSelected(null)}><X size={18} /></button>
-              {selected.fieldReport ? (
+              {selected.communityPost || selected.kind === "community-post" ? (
+                <>
+                  <div className="event-kicker">PUBLIC POST · {(selected.platform || "WEB").toUpperCase()}</div>
+                  <h2>{selected.locationLabel || "โพสต์จากพื้นที่"}</h2>
+                  <div className="event-label">{selected.label || "โพสต์สาธารณะ"}</div>
+                  {selected.thumbnail && (
+                    <div className="report-media">
+                      <img src={selected.thumbnail} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.parentElement!.style.display = "none"; }} />
+                    </div>
+                  )}
+                  <p className="report-title">{selected.title || "เปิดโพสต์ต้นฉบับเพื่อดูรายละเอียด"}</p>
+                  <div className="report-meta">
+                    {selected.authorName && <span>{selected.authorName}</span>}
+                    <span>{selected.platform || "web"}</span>
+                    <span>{selected.postedAt ? timeLabel(selected.postedAt) : "ล่าสุด"}</span>
+                    <span>{selected.locationAccuracy || "approximate"}</span>
+                  </div>
+                  {selected.sourceUrl && (
+                    <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      ไปที่โพสต์ต้นฉบับ <ExternalLink size={14} />
+                    </a>
+                  )}
+                  <div className="source-note">
+                    <Users size={15} />
+                    <span>แสดงเพียง metadata/thumbnail และลิงก์กลับไปยังโพสต์ต้นฉบับ ไม่ได้คัดลอกวิดีโอมาเก็บใน WINTER</span>
+                  </div>
+                </>
+              ) : selected.fieldReport ? (
                 <>
                   <div className="event-kicker">{selected.sourceType === "official" ? "OFFICIAL REPORT" : "PUBLIC NEWS REPORT"}</div>
                   <h2>{selected.name}</h2>
@@ -586,7 +810,141 @@ function App() {
         <span><Cloud size={15} /> JMA Himawari-9</span>
         <span><Compass size={15} /> Open-Meteo weather signals</span>
         <span><MapPinned size={15} /> LIVE REPORTS: DWR · TMD · PRD · GDELT</span>
+        <span><Users size={15} /> Community Posts · Cloudflare D1</span>
       </section>
+
+      {submitOpen && (
+        <div className="search-overlay" onMouseDown={e => e.currentTarget === e.target && resetSubmit()}>
+          <div className="submit-panel">
+            <div className="submit-head">
+              <div><small>COMMUNITY POST</small><h3>เพิ่มโพสต์สาธารณะลงแผนที่</h3></div>
+              <button onClick={resetSubmit}><X size={19} /></button>
+            </div>
+
+            {submitState === "sent" ? (
+              <div className="submit-success">
+                <Send size={24} />
+                <strong>รับโพสต์แล้ว</strong>
+                <span>รายการถูกเก็บเป็น pending เพื่อป้องกันสแปม/ตำแหน่งผิด ก่อนนำขึ้นแผนที่จริง</span>
+                <button onClick={resetSubmit}>ปิด</button>
+              </div>
+            ) : (
+              <>
+                <label className="submit-field">
+                  <span>ลิงก์โพสต์</span>
+                  <input value={submitUrl} onChange={e => setSubmitUrl(e.target.value)} placeholder="TikTok / YouTube / X / Facebook / Reddit..." />
+                </label>
+
+                <label className="submit-field">
+                  <span>พื้นที่เกิดเหตุ</span>
+                  <input
+                    value={submitCoords ? submitCoords.label : submitPlace}
+                    onChange={e => { setSubmitCoords(null); setSubmitPlace(e.target.value); }}
+                    placeholder="เช่น ปากช่อง, นครราชสีมา"
+                  />
+                </label>
+
+                {!submitCoords && submitPlaces.length > 0 && (
+                  <div className="submit-place-results">
+                    {submitPlaces.map(r => (
+                      <button key={r.id || `${r.latitude}-${r.longitude}`} onClick={() => {
+                        setSubmitCoords({
+                          lat: r.latitude,
+                          lon: r.longitude,
+                          label: [r.name, r.admin1].filter(Boolean).join(", ")
+                        });
+                        setSubmitPlace([r.name, r.admin1].filter(Boolean).join(", "));
+                        setSubmitPlaces([]);
+                      }}>
+                        <MapPinned size={15} />
+                        <span>{r.name}<small>{[r.admin1, r.country].filter(Boolean).join(" · ")}</small></span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                <label className="submit-field">
+                  <span>คำอธิบายสั้น ๆ (ไม่บังคับ)</span>
+                  <textarea value={submitNote} onChange={e => setSubmitNote(e.target.value)} placeholder="เช่น น้ำสูงประมาณครึ่งล้อ รถเล็กเริ่มผ่านยาก" />
+                </label>
+
+                <div className="submit-note">
+                  ระบบจะเก็บ URL + metadata + ตำแหน่ง ไม่ดาวน์โหลดวิดีโอต้นฉบับมาเก็บ
+                </div>
+
+                <button
+                  className="submit-action"
+                  disabled={!submitUrl.trim() || !submitCoords || submitState === "sending"}
+                  onClick={submitPost}
+                >
+                  {submitState === "sending" ? "กำลังส่ง..." : submitState === "error" ? "ส่งไม่สำเร็จ — ลองอีกครั้ง" : "ส่งโพสต์เข้าระบบ"}
+                  <Send size={16} />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {submitOpen && (
+        <div className="search-overlay submit-overlay" onMouseDown={e => e.currentTarget === e.target && setSubmitOpen(false)}>
+          <div className="submit-panel">
+            <div className="submit-head">
+              <div>
+                <small>PUBLIC POST</small>
+                <h2>เพิ่มโพสต์จากพื้นที่</h2>
+              </div>
+              <button onClick={() => setSubmitOpen(false)}><X size={19} /></button>
+            </div>
+
+            <label>
+              <span>ลิงก์โพสต์สาธารณะ</span>
+              <input value={submitUrl} onChange={e => setSubmitUrl(e.target.value)} placeholder="YouTube / TikTok / X / Reddit / เว็บ" />
+            </label>
+
+            <label>
+              <span>พื้นที่เกิดเหตุ</span>
+              <div className="submit-place-row">
+                <input value={submitPlace} onChange={e => { setSubmitPlace(e.target.value); setSubmitCoords(null); }} placeholder="ค้นหาจังหวัด อำเภอ หรือเมือง" />
+                <button type="button" onClick={locateSubmission}><LocateFixed size={16} /> ใช้ตำแหน่งฉัน</button>
+              </div>
+            </label>
+
+            {!!submitPlaces.length && (
+              <div className="submit-place-results">
+                {submitPlaces.map(r => (
+                  <button key={r.id || `${r.latitude}-${r.longitude}`} onClick={() => chooseSubmitPlace(r)}>
+                    <MapPinned size={15} />
+                    <span><strong>{r.name}</strong><small>{[r.admin1, r.country].filter(Boolean).join(" · ")}</small></span>
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {submitCoords && (
+              <div className="submit-coords"><MapPinned size={14} /> {submitPlace || "เลือกตำแหน่งแล้ว"} · {submitCoords.lat.toFixed(3)}, {submitCoords.lon.toFixed(3)}</div>
+            )}
+
+            <label>
+              <span>รายละเอียดเพิ่มเติม <em>ไม่บังคับ</em></span>
+              <textarea value={submitNote} onChange={e => setSubmitNote(e.target.value)} placeholder="เช่น น้ำท่วมสูง รถเล็กผ่านไม่ได้" rows={3} />
+            </label>
+
+            <div className="submit-info">
+              ระบบจะอ่าน metadata/thumbnail จากต้นทางเมื่อรองรับ และเก็บเฉพาะ URL + metadata + ตำแหน่ง ไม่ดาวน์โหลดวิดีโอต้นฉบับมาเก็บ
+            </div>
+
+            <button
+              className="submit-send"
+              disabled={!submitUrl.trim() || !submitCoords || submitState === "sending"}
+              onClick={submitPublicPost}
+            >
+              {submitState === "sending" ? <Activity size={16} className="spin" /> : submitState === "sent" ? <span>✓</span> : <Send size={16} />}
+              {submitState === "sent" ? "ส่งแล้ว · รอตรวจสอบ" : submitState === "error" ? "ส่งไม่สำเร็จ ลองใหม่" : "ส่งโพสต์เข้าระบบ"}
+            </button>
+          </div>
+        </div>
+      )}
 
       {searchOpen && (
         <div className="search-overlay" onMouseDown={e => e.currentTarget === e.target && setSearchOpen(false)}>
