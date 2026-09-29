@@ -886,65 +886,6 @@ function App() {
         </div>
       )}
 
-      {submitOpen && (
-        <div className="search-overlay submit-overlay" onMouseDown={e => e.currentTarget === e.target && setSubmitOpen(false)}>
-          <div className="submit-panel">
-            <div className="submit-head">
-              <div>
-                <small>PUBLIC POST</small>
-                <h2>เพิ่มโพสต์จากพื้นที่</h2>
-              </div>
-              <button onClick={() => setSubmitOpen(false)}><X size={19} /></button>
-            </div>
-
-            <label>
-              <span>ลิงก์โพสต์สาธารณะ</span>
-              <input value={submitUrl} onChange={e => setSubmitUrl(e.target.value)} placeholder="YouTube / TikTok / X / Reddit / เว็บ" />
-            </label>
-
-            <label>
-              <span>พื้นที่เกิดเหตุ</span>
-              <div className="submit-place-row">
-                <input value={submitPlace} onChange={e => { setSubmitPlace(e.target.value); setSubmitCoords(null); }} placeholder="ค้นหาจังหวัด อำเภอ หรือเมือง" />
-                <button type="button" onClick={locateSubmission}><LocateFixed size={16} /> ใช้ตำแหน่งฉัน</button>
-              </div>
-            </label>
-
-            {!!submitPlaces.length && (
-              <div className="submit-place-results">
-                {submitPlaces.map(r => (
-                  <button key={r.id || `${r.latitude}-${r.longitude}`} onClick={() => chooseSubmitPlace(r)}>
-                    <MapPinned size={15} />
-                    <span><strong>{r.name}</strong><small>{[r.admin1, r.country].filter(Boolean).join(" · ")}</small></span>
-                  </button>
-                ))}
-              </div>
-            )}
-
-            {submitCoords && (
-              <div className="submit-coords"><MapPinned size={14} /> {submitPlace || "เลือกตำแหน่งแล้ว"} · {submitCoords.lat.toFixed(3)}, {submitCoords.lon.toFixed(3)}</div>
-            )}
-
-            <label>
-              <span>รายละเอียดเพิ่มเติม <em>ไม่บังคับ</em></span>
-              <textarea value={submitNote} onChange={e => setSubmitNote(e.target.value)} placeholder="เช่น น้ำท่วมสูง รถเล็กผ่านไม่ได้" rows={3} />
-            </label>
-
-            <div className="submit-info">
-              ระบบจะอ่าน metadata/thumbnail จากต้นทางเมื่อรองรับ และเก็บเฉพาะ URL + metadata + ตำแหน่ง ไม่ดาวน์โหลดวิดีโอต้นฉบับมาเก็บ
-            </div>
-
-            <button
-              className="submit-send"
-              disabled={!submitUrl.trim() || !submitCoords || submitState === "sending"}
-              onClick={submitPublicPost}
-            >
-              {submitState === "sending" ? <Activity size={16} className="spin" /> : submitState === "sent" ? <span>✓</span> : <Send size={16} />}
-              {submitState === "sent" ? "ส่งแล้ว · รอตรวจสอบ" : submitState === "error" ? "ส่งไม่สำเร็จ ลองใหม่" : "ส่งโพสต์เข้าระบบ"}
-            </button>
-          </div>
-        </div>
-      )}
 
       {searchOpen && (
         <div className="search-overlay" onMouseDown={e => e.currentTarget === e.target && setSearchOpen(false)}>
