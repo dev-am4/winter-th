@@ -1,6 +1,6 @@
 import { PROVINCES } from "./provinces";
 
-type Env = { ASSETS: Fetcher; POSTS_DB: any; DISCOVERY_QUEUE?: any; DISCOVERY_ADMIN_TOKEN?: string; BRAVE_SEARCH_API_KEY?: string; YOUTUBE_API_KEY?: string };
+type Env = { ASSETS: Fetcher; POSTS_DB: any; DISCOVERY_QUEUE?: any; DISCOVERY_ADMIN_TOKEN?: string; BRAVE_SEARCH_API_KEY?: string; YOUTUBE_API_KEY?: string; GISTDA_API_KEY?: string; GISTDA_PUBLIC_KEY?: string };
 
 const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
@@ -1142,6 +1142,83 @@ async function kickDiscovery(request: Request, env: Env) {
   return json({ ok: true, queued, runs }, 200, 0);
 }
 
+
+const THAIWATER_BASE = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
+const GISTDA_BASE = "https://api-gateway.gistda.or.th/api/2.0/resources";
+
+async function proxyJsonFeed(request: Request, upstream: string, ttl: number, ctx: any) {
+  const cache = (caches as unknown as { default: Cache }).default;
+  const key = new Request(request.url, { method: "GET" });
+  const hit = await cache.match(key);
+  if (hit) return hit;
+
+  const response = await fetch(upstream, {
+    headers: {
+      "user-agent": "winter-th/0.3 thailand-flood-intelligence",
+      "accept": "application/json"
+    }
+  });
+
+  if (!response.ok) {
+    return json({ error: "UPSTREAM_ERROR", status: response.status }, 502, 0);
+  }
+
+  const out = new Response(response.body, {
+    status: 200,
+    headers: {
+      ...JSON_HEADERS,
+      "cache-control": `public, max-age=${Math.min(ttl, 300)}, s-maxage=${ttl}, stale-while-revalidate=${ttl * 2}`,
+      "x-winter-source": "thaiwater"
+    }
+  });
+  ctx.waitUntil(cache.put(key, out.clone()));
+  return out;
+}
+
+async function floodConfig(env: Env, ctx: any) {
+  const publicKey = String(env.GISTDA_PUBLIC_KEY || "").trim();
+  const serverKey = String(env.GISTDA_API_KEY || "").trim();
+  let summary: any = null;
+  let summaryError = "";
+
+  if (serverKey) {
+    const endpoint = `${GISTDA_BASE}/features/flood/1day?api_key=${encodeURIComponent(serverKey)}&limit=1`;
+    try {
+      const data: any = await cachedJson(endpoint, 900, ctx);
+      const p = data?.features?.[0]?.properties || {};
+      const files = String(p.file_name || "").split(",").map((x: string) => x.trim()).filter(Boolean);
+      summary = {
+        cells: Number(data?.numberMatched || 0),
+        files: files.slice(0, 12),
+        createdAt: p?._createdAt || null
+      };
+    } catch (error: any) {
+      summaryError = String(error?.message || "GISTDA unavailable").replace(/api_key=[^&\\s]+/g, "api_key=***");
+    }
+  }
+
+  return json({
+    gistda: {
+      enabled: Boolean(publicKey),
+      period: "1day",
+      tileTemplate: publicKey
+        ? `${GISTDA_BASE}/maps/flood/1day/tms/{z}/{x}/{y}?api_key=${encodeURIComponent(publicKey)}`
+        : null,
+      summary,
+      summaryAvailable: Boolean(serverKey),
+      error: summaryError || null,
+      sourceUrl: "https://disaster.gistda.or.th/flood"
+    },
+    hydro: {
+      waterlevel: "/api/hydro/waterlevel",
+      rain24h: "/api/hydro/rain24h",
+      floodRoad: "/api/hydro/flood-road",
+      sourceUrl: "https://www.thaiwater.net/new4all"
+    },
+    updatedAt: new Date().toISOString()
+  }, 200, 180);
+}
+
 async function satellite(ctx: any) {
   const endpoint = "https://www.jma.go.jp/bosai/himawari/data/satimg/targetTimes_fd.json";
   const data = await cachedJson(endpoint, 300, ctx);
@@ -1174,6 +1251,10 @@ export default {
       if (url.pathname === "/api/discovery/status") return await discoveryStatus(env);
       if (url.pathname === "/api/discovery/kick" && request.method === "POST") return await kickDiscovery(request, env);
       if (url.pathname === "/api/posts/discover/youtube") return await youtubeDiscover(url, env);
+      if (url.pathname === "/api/hydro/waterlevel") return await proxyJsonFeed(request, `${THAIWATER_BASE}/waterlevel_load`, 300, ctx);
+      if (url.pathname === "/api/hydro/rain24h") return await proxyJsonFeed(request, `${THAIWATER_BASE}/rain_24h`, 600, ctx);
+      if (url.pathname === "/api/hydro/flood-road") return await proxyJsonFeed(request, `${THAIWATER_BASE}/flood_road`, 180, ctx);
+      if (url.pathname === "/api/flood/config") return await floodConfig(env, ctx);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
     } catch (error: any) {
