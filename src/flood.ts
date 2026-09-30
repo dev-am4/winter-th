@@ -157,3 +157,80 @@ export function hydroStats(features: FloodFeature[]) {
   const critical = features.filter((f) => Number(f.properties.severity || 0) >= 3).length;
   return { water, rain, road, alerts, critical, total: features.length };
 }
+
+
+function ageOk(value: unknown, days: number) {
+  const iso = isoLocal(value);
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return false;
+  const age = Date.now() - t;
+  return age >= -6 * 3600_000 && age <= days * 86400_000;
+}
+
+function thaiArea(address: string) {
+  const s = String(address || "").replace(/\s+/g, " ").trim();
+  const subdistrict = s.match(/(?:แขวง|ตำบล|ต\.)\s*([^\s,]+)/)?.[1] || "";
+  const district = s.match(/(?:เขต|อำเภอ|อ\.)\s*([^\s,]+)/)?.[1] || "";
+  return { subdistrict, district };
+}
+
+export function parseTraffyFlood(raw: any, days = 1): FloodFeature[] {
+  const rows = raw?.results;
+  if (!Array.isArray(rows)) return [];
+
+  const out: FloodFeature[] = [];
+  for (const row of rows) {
+    const description = String(row?.description || "");
+    const types = Array.isArray(row?.problem_type_abdul) ? row.problem_type_abdul : [];
+    const isFlood = /ท่วม|น้ำขัง|น้ำรอระบาย|น้ำล้น|ระบายน้ำ/i.test(description) || types.some((x: any) => String(x).includes("น้ำท่วม"));
+    if (!isFlood || !ageOk(row?.timestamp, days)) continue;
+
+    const lon = Number(row?.coords?.[0]);
+    const lat = Number(row?.coords?.[1]);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    if (lon < 99.9 || lon > 100.95 || lat < 13.35 || lat > 14.25) continue;
+
+    const observedAt = isoLocal(row?.timestamp);
+    const address = String(row?.address || "").replace(/\s+/g, " ").trim();
+    const area = thaiArea(address);
+    const severe = /ผ่านไม่ได้|เข้าบ้าน|ถึงเข่า|ครึ่งล้อ|รถดับ|สูงมาก|หนักมาก/i.test(description);
+    const closed = String(row?.state || "") === "เสร็จสิ้น";
+    const severity = closed ? 0 : severe ? 3 : 2;
+
+    out.push(point(lon, lat, {
+      id: `traffy-${row?.ticket_id || out.length}`,
+      kind: "traffy-flood",
+      eventType: "road-flood-report",
+      sourceType: "community",
+      source: "Traffy Fondue",
+      fieldReport: true,
+      exactLocation: true,
+      locationAccuracy: "gps",
+      name: area.district ? `เขต${area.district}` : (address || "รายงานน้ำท่วม"),
+      province: "กรุงเทพมหานคร",
+      district: area.district,
+      subdistrict: area.subdistrict,
+      address,
+      label: closed ? "รายงานปิดแล้ว" : severe ? "รายงานน้ำท่วมรุนแรง" : "รายงานน้ำท่วม",
+      severity,
+      detail: description.slice(0, 260),
+      observedAt,
+      photo: String(row?.photo_url || ""),
+      state: String(row?.state || ""),
+      agency: "NECTEC · Traffy Fondue",
+      sourceUrl: row?.ticket_id
+        ? `https://share.traffy.in.th/teamchadchart?ticket_id=${encodeURIComponent(row.ticket_id)}`
+        : "https://share.traffy.in.th/teamchadchart"
+    }));
+  }
+
+  return out;
+}
+
+export function incidentStats(features: FloodFeature[]) {
+  const traffy = features.filter((f) => f.properties.kind === "traffy-flood").length;
+  const dpm = features.filter((f) => f.properties.kind === "dpm-incident").length;
+  const exact = features.filter((f) => f.properties.locationAccuracy === "gps").length;
+  const active = features.filter((f) => Number(f.properties.severity || 0) >= 2).length;
+  return { traffy, dpm, exact, active, total: features.length };
+}
