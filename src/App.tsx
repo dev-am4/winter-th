@@ -3,9 +3,10 @@ import {
   Activity, Cloud, CloudLightning, CloudRain, Compass, Droplets, ExternalLink,
   Layers3, LocateFixed, MapPinned, Pause, Play, Plus, Search, Send, Users, Wind, X
 } from "lucide-react";
+import { hydroStats, parseThaiWaterLevel, parseThaiWaterRain, parseThaiWaterRoad } from "./flood";
 
-type OverlayMode = "none" | "radar" | "sat-ir" | "sat-rgb";
-type SignalFilter = "all" | "active" | "rain" | "wind" | "reports" | "community";
+type OverlayMode = "none" | "flood" | "radar" | "sat-ir" | "sat-rgb";
+type SignalFilter = "all" | "active" | "rain" | "water" | "reports" | "community";
 type FocusPoint = { lon: number; lat: number; zoom?: number } | null;
 
 function jmaDate(stamp: string) {
@@ -34,15 +35,15 @@ function filterFeatures(collection: any, filter: SignalFilter) {
   if (filter === "reports") return source.filter((f: any) => f.properties?.fieldReport);
   if (filter === "community") return [];
   if (filter === "active") return source.filter((f: any) => Number(f.properties?.severity || 0) > 0);
-  if (filter === "rain") return source.filter((f: any) => ["storm","heavy-rain","rain","drizzle"].includes(f.properties?.eventType));
-  if (filter === "wind") return source.filter((f: any) => f.properties?.eventType === "wind");
+  if (filter === "rain") return source.filter((f: any) => ["storm","heavy-rain","rain","drizzle","rain-gauge"].includes(f.properties?.eventType));
+  if (filter === "water") return source.filter((f: any) => ["water-station","road-flood-sensor"].includes(f.properties?.kind));
   return source;
 }
 
 function NationalMap({
-  collection, filter, overlay, radar, satellite, playing, focus, onSelect
+  collection, filter, overlay, radar, satellite, flood, playing, focus, onSelect
 }: {
-  collection: any; filter: SignalFilter; overlay: OverlayMode; radar: any; satellite: any;
+  collection: any; filter: SignalFilter; overlay: OverlayMode; radar: any; satellite: any; flood: any;
   playing: boolean; focus: FocusPoint; onSelect: (x: any) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -211,6 +212,9 @@ function NationalMap({
                 "rain", "#70b7ff",
                 "drizzle", "#7fd6e7",
                 "wind", "#c49cff",
+                "water-level", "#31c6f4",
+                "road-flood", "#23d3b4",
+                "rain-gauge", "#4da3ff",
                 "#6f8190"
               ]
             ],
@@ -406,7 +410,8 @@ function NationalMap({
     const map = mapRef.current;
     if (!mapReady || !map) return;
 
-    if (overlay === "none" || !frames.length) {
+    const floodTile = flood?.gistda?.tileTemplate || "";
+    if (overlay === "none" || (overlay === "flood" ? !floodTile : !frames.length)) {
       if (map.getLayer("weather-overlay")) map.removeLayer("weather-overlay");
       if (map.getSource("weather-overlay")) map.removeSource("weather-overlay");
       return;
@@ -416,7 +421,10 @@ function NationalMap({
     let tile = "";
     let maxzoom = 7;
 
-    if (overlay === "radar") {
+    if (overlay === "flood") {
+      tile = floodTile;
+      maxzoom = 12;
+    } else if (overlay === "radar") {
       tile = `${radar.host}${current.path}/256/{z}/{x}/{y}/2/1_0.png`;
       maxzoom = 7;
     } else {
@@ -435,16 +443,17 @@ function NationalMap({
         type: "raster",
         source: "weather-overlay",
         paint: {
-          "raster-opacity": overlay === "radar" ? 0.68 : 0.6,
+          "raster-opacity": overlay === "flood" ? 0.7 : overlay === "radar" ? 0.68 : 0.6,
           "raster-fade-duration": 0,
           "raster-saturation": overlay === "sat-ir" ? -0.75 : 0
         }
       }, "clusters");
     }
-  }, [mapReady, overlay, frame, radar, satellite, frames.length]);
+  }, [mapReady, overlay, frame, radar, satellite, flood, frames.length]);
 
   const currentFrameLabel = useMemo(() => {
     const current = frames[Math.min(frame, Math.max(0, frames.length - 1))];
+    if (overlay === "flood") return "GISTDA · 1 DAY";
     if (!current) return null;
     return overlay === "radar" ? timeLabel(current.time * 1000) : timeLabel(jmaDate(current.validtime));
   }, [frames, frame, overlay]);
@@ -454,9 +463,9 @@ function NationalMap({
       <div ref={hostRef} className="national-map" />
       <div className="map-vignette" />
       {overlay !== "none" && (
-        <div className="map-time"><span className="live-dot" />{overlay === "radar" ? "RADAR" : "HIMAWARI"} <strong>{currentFrameLabel || "—"}</strong></div>
+        <div className="map-time"><span className="live-dot" />{overlay === "flood" ? "FLOOD SATELLITE" : overlay === "radar" ? "RADAR" : "HIMAWARI"} <strong>{currentFrameLabel || "—"}</strong></div>
       )}
-      {frames.length > 0 && overlay !== "none" && (
+      {frames.length > 0 && overlay !== "none" && overlay !== "flood" && (
         <div className="map-frame-track">
           {frames.map((_: any, i: number) => (
             <button key={i} className={i === frame ? "active" : ""} onClick={() => setFrame(i)} aria-label={`เฟรม ${i + 1}`} />
@@ -482,6 +491,9 @@ function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [locating, setLocating] = useState(false);
   const [postStats, setPostStats] = useState<any>({ total: 0, active: 0, pending: 0 });
+  const [hydro, setHydro] = useState<any>({ type: "FeatureCollection", features: [] });
+  const [floodConfig, setFloodConfig] = useState<any>({ gistda: { enabled: false, tileTemplate: null } });
+  const [hydroLoading, setHydroLoading] = useState(true);
   const [submitOpen, setSubmitOpen] = useState(false);
   const [submitUrl, setSubmitUrl] = useState("");
   const [submitNote, setSubmitNote] = useState("");
@@ -496,14 +508,37 @@ function App() {
       fetch("/api/reports").then(r => r.json()).catch(() => ({ type: "FeatureCollection", features: [], meta: {} })),
       fetch("/api/radar").then(r => r.json()),
       fetch("/api/satellite").then(r => r.json()),
-      fetch("/api/posts/stats").then(r => r.json()).catch(() => ({ total: 0, active: 0, pending: 0 }))
-    ]).then(([s, rep, r, sat, ps]) => {
+      fetch("/api/posts/stats").then(r => r.json()).catch(() => ({ total: 0, active: 0, pending: 0 })),
+      fetch("/api/flood/config").then(r => r.json()).catch(() => ({ gistda: { enabled: false, tileTemplate: null } }))
+    ]).then(([s, rep, r, sat, ps, fc]) => {
       setSignals(s);
       setReports(rep);
       setRadar(r);
       setSatellite(sat);
       setPostStats(ps);
+      setFloodConfig(fc);
     }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const id = window.setTimeout(() => {
+      Promise.all([
+        fetch("/api/hydro/waterlevel").then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch("/api/hydro/rain24h").then(r => r.ok ? r.json() : null).catch(() => null),
+        fetch("/api/hydro/flood-road").then(r => r.ok ? r.json() : null).catch(() => null)
+      ]).then(([wl, rain, road]) => {
+        if (cancelled) return;
+        const features = [
+          ...parseThaiWaterLevel(wl),
+          ...parseThaiWaterRain(rain, 35),
+          ...parseThaiWaterRoad(road)
+        ];
+        setHydro({ type: "FeatureCollection", features });
+        setHydroLoading(false);
+      });
+    }, 450);
+    return () => { cancelled = true; window.clearTimeout(id); };
   }, []);
 
   useEffect(() => {
@@ -535,24 +570,25 @@ function App() {
 
   const combined = useMemo(() => ({
     type: "FeatureCollection",
-    features: [...(signals.features || []), ...(reports.features || [])],
+    features: [...(signals.features || []), ...(hydro.features || []), ...(reports.features || [])],
     meta: {
       weather: signals.meta || {},
       reports: reports.meta || {}
     }
-  }), [signals, reports]);
+  }), [signals, hydro, reports]);
 
   const activeCount = useMemo(() =>
-    (signals.features || []).filter((f: any) => Number(f.properties?.severity || 0) > 0).length
-  , [signals]);
+    [...(signals.features || []), ...(hydro.features || [])].filter((f: any) => Number(f.properties?.severity || 0) > 0).length
+  , [signals, hydro]);
+  const hStats = useMemo(() => hydroStats(hydro.features || []), [hydro]);
 
   const reportCount = reports.features?.length || 0;
 
   const topSignals = useMemo(() =>
-    [...(signals.features || [])]
-      .sort((a: any, b: any) => Number(b.properties?.severity || 0) - Number(a.properties?.severity || 0) || Number(b.properties?.precipitation || 0) - Number(a.properties?.precipitation || 0))
+    [...(hydro.features || []), ...(signals.features || [])]
+      .sort((a: any, b: any) => Number(b.properties?.severity || 0) - Number(a.properties?.severity || 0) || Number(b.properties?.value || b.properties?.precipitation || 0) - Number(a.properties?.value || a.properties?.precipitation || 0))
       .slice(0, 8)
-  , [signals]);
+  , [signals, hydro]);
 
   const choosePlace = (r: any) => {
     setFocus({ lon: r.longitude, lat: r.latitude, zoom: 8.5 });
@@ -617,7 +653,7 @@ function App() {
   return (
     <main className="app">
       <header className="topbar">
-        <div className="brand"><span>W</span><div><strong>WINTER</strong><small>LIVE WEATHER MAP</small></div></div>
+        <div className="brand"><span>W</span><div><strong>WINTER</strong><small>THAILAND FLOOD INTELLIGENCE</small></div></div>
         <div className="top-actions">
           <button className="glass-button submit-trigger" onClick={() => setSubmitOpen(true)}><Plus size={17} /><span>เพิ่มโพสต์</span></button>
           <button className="glass-button" onClick={() => setSearchOpen(true)}><Search size={17} /><span>ค้นหาพื้นที่</span></button>
@@ -628,14 +664,15 @@ function App() {
       <section className="map-hero">
         <div className="map-copy">
           <div>
-            <span className="eyebrow"><span className="live-dot" /> THAILAND · LIVE</span>
-            <h1>ตอนนี้<br />ที่ไหนกำลังเกิดอะไร</h1>
+            <span className="eyebrow"><span className="live-dot" /> THAILAND · LIVE OPERATIONS</span>
+            <h1>Thailand Flood<br />Intelligence</h1>
+            <p className="hero-subtitle">สถานการณ์น้ำ ฝน พื้นที่น้ำท่วม และรายงานภาคสนามบนแผนที่เดียว</p>
           </div>
           <div className="national-stats">
-            <div><strong>{(signals.meta?.total || 0) + reportCount + Number(postStats.active || 0)}</strong><span>จุดบนแผนที่</span></div>
-            <div><strong>{activeCount}</strong><span>สัญญาณอากาศเด่น</span></div>
-            <div><strong>{reportCount}</strong><span>รายงาน/ข่าว</span></div>
-            <div><strong>{Number(postStats.active || 0)}</strong><span>โพสต์ประชาชน</span></div>
+            <div><strong>{hydroLoading ? "—" : hStats.water}</strong><span>WATER STATIONS</span></div>
+            <div><strong>{hydroLoading ? "—" : hStats.alerts}</strong><span>HYDRO ALERTS</span></div>
+            <div><strong>{reportCount}</strong><span>OFFICIAL REPORTS</span></div>
+            <div><strong>{Number(postStats.active || 0)}</strong><span>FIELD POSTS</span></div>
           </div>
         </div>
 
@@ -646,10 +683,9 @@ function App() {
               <button className={filter === "all" ? "active" : ""} onClick={() => { setFilter("all"); setSelected(null); }}>ทั้งหมด</button>
               <button className={filter === "active" ? "active" : ""} onClick={() => { setFilter("active"); setSelected(null); }}>เด่นตอนนี้</button>
               <button className={filter === "rain" ? "active" : ""} onClick={() => { setFilter("rain"); setSelected(null); }}><Droplets size={14} /> ฝน</button>
-              <button className={filter === "wind" ? "active" : ""} onClick={() => { setFilter("wind"); setSelected(null); }}><Wind size={14} /> ลม</button>
+              <button className={filter === "water" ? "active" : ""} onClick={() => { setFilter("water"); setSelected(null); }}><Droplets size={14} /> ระดับน้ำ</button>
               <button className={filter === "reports" ? "active report-pill" : "report-pill"} onClick={openReports}><MapPinned size={14} /> LIVE REPORTS</button>
-              <button className={filter === "community" ? "active community-pill" : "community-pill"} onClick={() => { setFilter("community"); setSelected(null); }}><Users size={14} /> POSTS คนทั่วไป</button>
-              <button className={filter === "community" ? "active community-pill" : "community-pill"} onClick={() => { setFilter("community"); setSelected(null); }}><Users size={14} /> โพสต์ประชาชน</button>
+              <button className={filter === "community" ? "active community-pill" : "community-pill"} onClick={() => { setFilter("community"); setSelected(null); }}><Users size={14} /> Field posts</button>
               <button className="submit-pill" onClick={() => setSubmitOpen(true)}><Plus size={14} /> เพิ่มโพสต์</button>
             </div>
           </div>
@@ -657,7 +693,8 @@ function App() {
           <div className="toolbar-group align-end">
             <small>เลเยอร์แผนที่</small>
             <div className="pill-row">
-              <button className={overlay === "none" ? "active" : ""} onClick={() => setOverlay("none")}><Layers3 size={14} /> Map</button>
+              <button className={overlay === "none" ? "active" : ""} onClick={() => setOverlay("none")}><Layers3 size={14} /> Base map</button>
+              <button disabled={!floodConfig?.gistda?.enabled} title={floodConfig?.gistda?.enabled ? "GISTDA flood satellite · latest 1 day" : "ตั้งค่า GISTDA_PUBLIC_KEY เพื่อเปิดชั้นนี้"} className={overlay === "flood" ? "active flood-layer-pill" : "flood-layer-pill"} onClick={() => floodConfig?.gistda?.enabled && setOverlay("flood")}>Flood satellite</button>
               <button className={overlay === "radar" ? "active" : ""} onClick={() => setOverlay("radar")}>Radar</button>
               <button className={overlay === "sat-ir" ? "active" : ""} onClick={() => setOverlay("sat-ir")}>Sat IR</button>
               <button className={overlay === "sat-rgb" ? "active" : ""} onClick={() => setOverlay("sat-rgb")}>Sat RGB</button>
@@ -677,6 +714,7 @@ function App() {
             overlay={overlay}
             radar={radar}
             satellite={satellite}
+            flood={floodConfig}
             playing={playing}
             focus={focus}
             onSelect={setSelected}
@@ -696,10 +734,10 @@ function App() {
               </>
             ) : (
               <>
-                <span><i className="dot storm" /> พายุ</span>
-                <span><i className="dot rain" /> ฝน</span>
-                <span><i className="dot wind" /> ลมแรง</span>
-                <span><i className="dot normal" /> ปกติ/เมฆ</span>
+                <span><i className="dot water" /> ระดับน้ำ</span>
+                <span><i className="dot rain" /> ฝนหนัก</span>
+                <span><i className="dot road" /> น้ำท่วมถนน</span>
+                <span><i className="dot storm" /> พายุ/สัญญาณอากาศ</span>
               </>
             )}
           </div>
@@ -733,6 +771,28 @@ function App() {
                     <Users size={15} />
                     <span>แสดงเพียง metadata/thumbnail และลิงก์กลับไปยังโพสต์ต้นฉบับ ไม่ได้คัดลอกวิดีโอมาเก็บใน WINTER</span>
                   </div>
+                </>
+              ) : ["water-station","rain-station","road-flood-sensor"].includes(selected.kind) ? (
+                <>
+                  <div className="event-kicker">OFFICIAL SENSOR · {String(selected.source || "THAIWATER").toUpperCase()}</div>
+                  <h2>{selected.name}</h2>
+                  <div className="event-label">{selected.label}</div>
+                  <div className="event-metrics">
+                    <div><span>ค่าล่าสุด</span><strong>{Number(selected.value || 0).toFixed(selected.kind === "water-station" ? 2 : 0)} {selected.unit || ""}</strong></div>
+                    <div><span>พื้นที่</span><strong>{selected.district || selected.province || "—"}</strong></div>
+                    <div><span>สถานะ</span><strong>{Number(selected.severity || 0) >= 3 ? "Critical" : Number(selected.severity || 0) >= 2 ? "Watch" : "Normal"}</strong></div>
+                  </div>
+                  {selected.detail && <p className="report-title">{selected.detail}</p>}
+                  <div className="report-meta">
+                    <span>{selected.agency || selected.source}</span>
+                    <span>{selected.observedAt ? timeLabel(selected.observedAt) : "ล่าสุด"}</span>
+                    <span>GPS station</span>
+                  </div>
+                  {selected.sourceUrl && (
+                    <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      เปิดข้อมูลต้นทาง <ExternalLink size={14} />
+                    </a>
+                  )}
                 </>
               ) : selected.fieldReport ? (
                 <>
@@ -798,7 +858,7 @@ function App() {
               }}>
                 <div className="signal-card-icon"><Icon size={20} /></div>
                 <div><strong>{p.name}</strong><span>{p.label}</span></div>
-                <div className="signal-card-value">{Math.round(Number(p.temperature || 0))}°</div>
+                <div className="signal-card-value">{p.value != null ? `${Number(p.value).toFixed(p.kind === "water-station" ? 2 : 0)} ${p.unit || ""}` : `${Math.round(Number(p.temperature || 0))}°`}</div>
               </button>
             );
           })}
@@ -806,11 +866,12 @@ function App() {
       </section>
 
       <section className="source-band">
-        <span><CloudRain size={15} /> RainViewer Radar</span>
+        <span><Droplets size={15} /> ThaiWater · HII water & rain stations</span>
+        <span><Layers3 size={15} /> GISTDA satellite flood layer</span>
+        <span><CloudRain size={15} /> RainViewer radar</span>
         <span><Cloud size={15} /> JMA Himawari-9</span>
-        <span><Compass size={15} /> Open-Meteo weather signals</span>
-        <span><MapPinned size={15} /> LIVE REPORTS: DWR · TMD · PRD · GDELT</span>
-        <span><Users size={15} /> Community Posts · Cloudflare D1</span>
+        <span><MapPinned size={15} /> DWR · TMD · PRD · GDELT reports</span>
+        <span><Users size={15} /> Field posts · Cloudflare D1</span>
       </section>
 
       {submitOpen && (

@@ -733,3 +733,316 @@ button:focus-visible,input:focus-visible { outline: 2px solid var(--accent); out
 @media (prefers-reduced-motion: reduce) {
   *,*::before,*::after { animation-duration:.01ms!important; animation-iteration-count:1!important; scroll-behavior:auto!important; }
 }
+
+
+/* 2026 Commercial product refresh */
+:root {
+  --bg: #070b10;
+  --panel: rgba(13, 19, 27, .92);
+  --glass: rgba(255,255,255,.045);
+  --line: rgba(216,229,240,.13);
+  --muted: rgba(226,237,246,.52);
+  --accent: #84dcff;
+  --success: #61d5b3;
+  --warning: #ffb45f;
+  --danger: #ff6f7d;
+}
+
+body {
+  background: #070b10;
+  color: #f4f8fb;
+}
+
+.app {
+  background:
+    radial-gradient(circle at 78% -8%, rgba(54,116,158,.14), transparent 36rem),
+    linear-gradient(180deg,#0b1118 0%,#080d13 46%,#070b10 100%);
+}
+
+.topbar {
+  min-height: 68px;
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  background: rgba(7,11,16,.78);
+  backdrop-filter: blur(20px) saturate(125%);
+  border-bottom-color: rgba(255,255,255,.09);
+}
+
+.brand > span {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: #f4f8fb;
+  color: #081018;
+  box-shadow: none;
+}
+
+.brand strong {
+  font-size: 11px;
+  letter-spacing: .2em;
+}
+
+.brand small {
+  font-size: 7px;
+  letter-spacing: .12em;
+}
+
+.glass-button {
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(255,255,255,.035);
+  border-color: rgba(255,255,255,.1);
+  backdrop-filter: none;
+}
+
+.glass-button:hover {
+  background: rgba(255,255,255,.07);
+}
+
+.map-hero {
+  padding-top: 34px;
+}
+
+.map-copy {
+  align-items: end;
+  margin-bottom: 22px;
+}
+
+.map-copy h1 {
+  max-width: 900px;
+  margin-top: 10px;
+  font-size: clamp(46px, 5vw, 74px);
+  font-weight: 500;
+  line-height: .98;
+  letter-spacing: -.052em;
+}
+
+.hero-subtitle {
+  max-width: 720px;
+  margin: 14px 0 0;
+  color: rgba(232,241,248,.58);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.eyebrow {
+  color: rgba(220,233,242,.55);
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.national-stats {
+  min-width: 470px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(255,255,255,.025);
+}
+
+.national-stats div {
+  min-height: 78px;
+  justify-content: center;
+  padding: 13px 16px;
+}
+
+.national-stats strong {
+  font-size: 24px;
+  letter-spacing: -.025em;
+}
+
+.national-stats span {
+  margin-top: 5px;
+  font-family: "Inter",system-ui,sans-serif;
+  font-size: 7px;
+  letter-spacing: .1em;
+  color: rgba(232,241,248,.43);
+}
+
+.map-toolbar {
+  margin: 0 0 10px;
+  padding: 11px 12px;
+  align-items: center;
+  border: 1px solid rgba(255,255,255,.09);
+  border-radius: 15px;
+  background: rgba(255,255,255,.022);
+}
+
+.toolbar-group small {
+  margin-bottom: 6px;
+  font-size: 7px;
+  font-weight: 600;
+}
+
+.pill-row button {
+  min-height: 32px;
+  border-radius: 9px;
+  border-color: rgba(255,255,255,.09);
+  background: transparent;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+.pill-row button.active {
+  background: #eef7fb;
+  border-color: #eef7fb;
+  color: #081018;
+}
+
+.pill-row button:disabled {
+  opacity: .32;
+  cursor: not-allowed;
+}
+
+.pill-row .flood-layer-pill {
+  border-color: rgba(76,174,236,.3);
+}
+
+.pill-row .flood-layer-pill.active {
+  background: #8edbff;
+  border-color: #8edbff;
+}
+
+.national-map-shell {
+  height: 74vh;
+  min-height: 690px;
+  max-height: 940px;
+  border-radius: 18px;
+  border-color: rgba(255,255,255,.12);
+  box-shadow: 0 32px 90px rgba(0,0,0,.32);
+}
+
+.map-vignette {
+  background:
+    linear-gradient(180deg,rgba(5,10,15,.2),transparent 20%,transparent 76%,rgba(5,10,15,.34)),
+    linear-gradient(90deg,rgba(5,10,15,.22),transparent 16%,transparent 84%,rgba(5,10,15,.22));
+}
+
+.map-time {
+  border-radius: 9px;
+  background: rgba(7,12,18,.84);
+  font-size: 8px;
+  font-weight: 600;
+}
+
+.legend span {
+  border-radius: 8px;
+  background: rgba(7,12,18,.82);
+}
+
+.dot.water { background: #31c6f4; }
+.dot.road { background: #23d3b4; }
+
+.event-panel {
+  width: min(390px,calc(100% - 36px));
+  background: rgba(9,15,22,.94);
+  border-radius: 16px;
+  border-color: rgba(255,255,255,.12);
+  backdrop-filter: blur(20px) saturate(120%);
+}
+
+.event-kicker {
+  font-weight: 600;
+}
+
+.event-panel h2 {
+  font-size: 24px;
+}
+
+.event-label {
+  border: 1px solid rgba(255,255,255,.08);
+  background: rgba(255,255,255,.035);
+}
+
+.event-metrics div {
+  border-radius: 11px;
+  background: rgba(255,255,255,.025);
+}
+
+.event-metrics strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-link {
+  border-radius: 10px;
+  background: #eef7fb;
+  color: #081018;
+}
+
+.signal-feed {
+  padding-top: 44px;
+}
+
+.signal-card {
+  min-height: 88px;
+  border-radius: 13px;
+  background: rgba(255,255,255,.022);
+}
+
+.signal-card:hover {
+  border-color: rgba(255,255,255,.19);
+  background: rgba(255,255,255,.045);
+}
+
+.signal-card-icon {
+  border-radius: 10px;
+}
+
+.signal-card-value {
+  max-width: 120px;
+  text-align: right;
+  font-size: 16px;
+  line-height: 1.25;
+}
+
+.source-band span {
+  border-radius: 8px;
+}
+
+.search-overlay {
+  background: rgba(3,6,10,.82);
+}
+
+.search-panel,
+.submit-panel {
+  background: rgba(11,17,24,.98);
+  border-radius: 16px;
+}
+
+.maplibregl-ctrl-group {
+  border-radius: 10px!important;
+  overflow: hidden;
+}
+
+@media (min-width: 1280px) {
+  .topbar,.map-hero,.signal-feed,.source-band {
+    width: min(1660px,calc(100% - 56px));
+  }
+}
+
+@media (max-width: 980px) {
+  .map-copy h1 { font-size: clamp(43px,8vw,62px); }
+  .national-stats { min-width: 0; }
+  .map-toolbar { padding: 9px; }
+}
+
+@media (max-width: 620px) {
+  .topbar { background: rgba(7,11,16,.9); }
+  .map-hero { padding-top: 22px; }
+  .map-copy { margin-bottom: 16px; }
+  .map-copy h1 { font-size: 42px; }
+  .hero-subtitle { font-size: 11px; margin-top: 10px; }
+  .national-stats {
+    grid-template-columns: repeat(2,1fr);
+    border-radius: 13px;
+  }
+  .national-stats div:nth-child(2) { border-right: 0; }
+  .national-stats div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .national-stats div { min-height: 67px; }
+  .national-map-shell {
+    min-height: 620px;
+    height: 72vh;
+    border-radius: 14px;
+  }
+}
