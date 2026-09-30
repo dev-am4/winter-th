@@ -3,11 +3,12 @@ import {
   Activity, Cloud, CloudLightning, CloudRain, Compass, Droplets, ExternalLink,
   Layers3, LocateFixed, MapPinned, Pause, Play, Plus, Search, Send, Users, Wind, X
 } from "lucide-react";
-import { hydroStats, parseThaiWaterLevel, parseThaiWaterRain, parseThaiWaterRoad } from "./flood";
+import { hydroStats, incidentStats, parseThaiWaterLevel, parseThaiWaterRain, parseThaiWaterRoad, parseTraffyFlood } from "./flood";
 
 type OverlayMode = "none" | "flood" | "radar" | "sat-ir" | "sat-rgb";
 type SignalFilter = "all" | "active" | "rain" | "water" | "reports" | "community";
 type FocusPoint = { lon: number; lat: number; zoom?: number } | null;
+type GeoFilter = { province: string; district: string; subdistrict: string };
 
 function jmaDate(stamp: string) {
   if (!stamp || stamp.length < 12) return new Date();
@@ -29,21 +30,32 @@ function signalIcon(type: string) {
   return Cloud;
 }
 
-function filterFeatures(collection: any, filter: SignalFilter) {
-  const source = collection?.features || [];
+function filterFeatures(collection: any, filter: SignalFilter, geo: GeoFilter, days: number) {
+  const since = Date.now() - days * 86400_000;
+  let source = (collection?.features || []).filter((f: any) => {
+    const p = f.properties || {};
+    const rawTime = p.observedAt || p.publishedAt || p.postedAt || p.detectedAt || "";
+    const t = Date.parse(rawTime);
+    if (Number.isFinite(t) && t < since) return false;
+    if (geo.province && String(p.province || "") !== geo.province) return false;
+    if (geo.district && String(p.district || "") !== geo.district) return false;
+    if (geo.subdistrict && String(p.subdistrict || "") !== geo.subdistrict) return false;
+    return true;
+  });
+
   if (filter === "all") return source;
   if (filter === "reports") return source.filter((f: any) => f.properties?.fieldReport);
   if (filter === "community") return [];
   if (filter === "active") return source.filter((f: any) => Number(f.properties?.severity || 0) > 0);
   if (filter === "rain") return source.filter((f: any) => ["storm","heavy-rain","rain","drizzle","rain-gauge"].includes(f.properties?.eventType));
-  if (filter === "water") return source.filter((f: any) => ["water-station","road-flood-sensor"].includes(f.properties?.kind));
+  if (filter === "water") return source.filter((f: any) => ["water-station","road-flood-sensor","traffy-flood","dpm-incident"].includes(f.properties?.kind));
   return source;
 }
 
 function NationalMap({
-  collection, filter, overlay, radar, satellite, flood, playing, focus, onSelect
+  collection, filter, geoFilter, days, overlay, radar, satellite, flood, playing, focus, onSelect
 }: {
-  collection: any; filter: SignalFilter; overlay: OverlayMode; radar: any; satellite: any; flood: any;
+  collection: any; filter: SignalFilter; geoFilter: GeoFilter; days: number; overlay: OverlayMode; radar: any; satellite: any; flood: any;
   playing: boolean; focus: FocusPoint; onSelect: (x: any) => void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
@@ -51,15 +63,17 @@ function NationalMap({
   const postMarkersRef = useRef<any[]>([]);
   const refreshPostsRef = useRef<null | (() => void)>(null);
   const filterRef = useRef<SignalFilter>(filter);
+  const daysRef = useRef(days);
   const [mapReady, setMapReady] = useState(false);
   const [frame, setFrame] = useState(0);
 
   filterRef.current = filter;
+  daysRef.current = days;
 
   const visibleCollection = useMemo(() => ({
     type: "FeatureCollection",
-    features: filterFeatures(collection, filter)
-  }), [collection, filter]);
+    features: filterFeatures(collection, filter, geoFilter, days)
+  }), [collection, filter, geoFilter, days]);
 
   const frames = overlay === "radar"
     ? (radar?.frames || [])
@@ -275,7 +289,7 @@ function NationalMap({
           const params = new URLSearchParams({
             bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
             zoom: String(zoom),
-            hours: filterRef.current === "community" ? "720" : "168"
+            hours: String(daysRef.current * 24)
           });
 
           try {
@@ -385,7 +399,7 @@ function NationalMap({
     const source: any = mapRef.current?.getSource("signals");
     source?.setData(visibleCollection);
     refreshPostsRef.current?.();
-  }, [mapReady, visibleCollection, filter]);
+  }, [mapReady, visibleCollection, filter, days]);
 
   useEffect(() => {
     if (!mapReady || !focus) return;
@@ -453,10 +467,10 @@ function NationalMap({
 
   const currentFrameLabel = useMemo(() => {
     const current = frames[Math.min(frame, Math.max(0, frames.length - 1))];
-    if (overlay === "flood") return "GISTDA · 1 DAY";
+    if (overlay === "flood") return `GISTDA · ${flood?.gistda?.days || days} DAY`;
     if (!current) return null;
     return overlay === "radar" ? timeLabel(current.time * 1000) : timeLabel(jmaDate(current.validtime));
-  }, [frames, frame, overlay]);
+  }, [frames, frame, overlay, flood, days]);
 
   return (
     <div className="national-map-shell">
@@ -482,6 +496,8 @@ function App() {
   const [radar, setRadar] = useState<any>(null);
   const [satellite, setSatellite] = useState<any>(null);
   const [filter, setFilter] = useState<SignalFilter>("all");
+  const [days, setDays] = useState<1 | 3 | 7>(1);
+  const [geoFilter, setGeoFilter] = useState<GeoFilter>({ province: "", district: "", subdistrict: "" });
   const [overlay, setOverlay] = useState<OverlayMode>("sat-rgb");
   const [playing, setPlaying] = useState(true);
   const [selected, setSelected] = useState<any>(null);
@@ -492,6 +508,8 @@ function App() {
   const [locating, setLocating] = useState(false);
   const [postStats, setPostStats] = useState<any>({ total: 0, active: 0, pending: 0 });
   const [hydro, setHydro] = useState<any>({ type: "FeatureCollection", features: [] });
+  const [incidents, setIncidents] = useState<any>({ type: "FeatureCollection", features: [] });
+  const [incidentLoading, setIncidentLoading] = useState(true);
   const [floodConfig, setFloodConfig] = useState<any>({ gistda: { enabled: false, tileTemplate: null } });
   const [hydroLoading, setHydroLoading] = useState(true);
   const [submitOpen, setSubmitOpen] = useState(false);
@@ -508,17 +526,53 @@ function App() {
       fetch("/api/reports").then(r => r.json()).catch(() => ({ type: "FeatureCollection", features: [], meta: {} })),
       fetch("/api/radar").then(r => r.json()),
       fetch("/api/satellite").then(r => r.json()),
-      fetch("/api/posts/stats").then(r => r.json()).catch(() => ({ total: 0, active: 0, pending: 0 })),
-      fetch("/api/flood/config").then(r => r.json()).catch(() => ({ gistda: { enabled: false, tileTemplate: null } }))
-    ]).then(([s, rep, r, sat, ps, fc]) => {
+      fetch("/api/posts/stats").then(r => r.json()).catch(() => ({ total: 0, active: 0, pending: 0 }))
+    ]).then(([s, rep, r, sat, ps]) => {
       setSignals(s);
       setReports(rep);
       setRadar(r);
       setSatellite(sat);
       setPostStats(ps);
-      setFloodConfig(fc);
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/flood/config?days=${days}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(data => { if (!cancelled && data) setFloodConfig(data); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [days]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setIncidentLoading(true);
+    const pages = days === 1 ? 1 : days === 3 ? 2 : 3;
+    const requests: Promise<any>[] = [
+      fetch(`/api/incidents/dpm?days=${days}`).then(r => r.ok ? r.json() : ({ features: [] })).catch(() => ({ features: [] }))
+    ];
+    for (let i = 0; i < pages; i++) {
+      requests.push(
+        fetch(`/api/incidents/traffy?offset=${i * 1000}&limit=1000`)
+          .then(r => r.ok ? r.json() : null)
+          .catch(() => null)
+      );
+    }
+
+    Promise.all(requests).then(([dpm, ...traffyPages]) => {
+      if (cancelled) return;
+      const merged = [
+        ...(dpm?.features || []),
+        ...traffyPages.flatMap(raw => parseTraffyFlood(raw, days))
+      ];
+      const deduped = [...new Map(merged.map((f: any) => [f.properties?.id, f])).values()];
+      setIncidents({ type: "FeatureCollection", features: deduped });
+      setIncidentLoading(false);
+    });
+
+    return () => { cancelled = true; };
+  }, [days]);
 
   useEffect(() => {
     let cancelled = false;
@@ -570,25 +624,40 @@ function App() {
 
   const combined = useMemo(() => ({
     type: "FeatureCollection",
-    features: [...(signals.features || []), ...(hydro.features || []), ...(reports.features || [])],
+    features: [...(incidents.features || []), ...(signals.features || []), ...(hydro.features || []), ...(reports.features || [])],
     meta: {
       weather: signals.meta || {},
       reports: reports.meta || {}
     }
-  }), [signals, hydro, reports]);
+  }), [signals, hydro, incidents, reports]);
 
   const activeCount = useMemo(() =>
     [...(signals.features || []), ...(hydro.features || [])].filter((f: any) => Number(f.properties?.severity || 0) > 0).length
   , [signals, hydro]);
   const hStats = useMemo(() => hydroStats(hydro.features || []), [hydro]);
+  const iStats = useMemo(() => incidentStats(incidents.features || []), [incidents]);
 
   const reportCount = reports.features?.length || 0;
+  const officialReportCount = reportCount + iStats.dpm;
 
   const topSignals = useMemo(() =>
-    [...(hydro.features || []), ...(signals.features || [])]
+    [...(incidents.features || []), ...(hydro.features || []), ...(signals.features || [])]
+      .filter((f: any) => Number(f.properties?.severity || 0) > 0)
       .sort((a: any, b: any) => Number(b.properties?.severity || 0) - Number(a.properties?.severity || 0) || Number(b.properties?.value || b.properties?.precipitation || 0) - Number(a.properties?.value || a.properties?.precipitation || 0))
       .slice(0, 8)
-  , [signals, hydro]);
+  , [signals, hydro, incidents]);
+
+  const geoOptions = useMemo(() => {
+    const rows = combined.features || [];
+    const provinces = [...new Set(rows.map((f: any) => String(f.properties?.province || "")).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
+    const districts = [...new Set(rows
+      .filter((f: any) => !geoFilter.province || f.properties?.province === geoFilter.province)
+      .map((f: any) => String(f.properties?.district || "")).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
+    const subdistricts = [...new Set(rows
+      .filter((f: any) => (!geoFilter.province || f.properties?.province === geoFilter.province) && (!geoFilter.district || f.properties?.district === geoFilter.district))
+      .map((f: any) => String(f.properties?.subdistrict || "")).filter(Boolean))].sort((a, b) => a.localeCompare(b, "th"));
+    return { provinces, districts, subdistricts };
+  }, [combined, geoFilter.province, geoFilter.district]);
 
   const choosePlace = (r: any) => {
     setFocus({ lon: r.longitude, lat: r.latitude, zoom: 8.5 });
@@ -671,7 +740,7 @@ function App() {
           <div className="national-stats">
             <div><strong>{hydroLoading ? "—" : hStats.water}</strong><span>WATER STATIONS</span></div>
             <div><strong>{hydroLoading ? "—" : hStats.alerts}</strong><span>HYDRO ALERTS</span></div>
-            <div><strong>{reportCount}</strong><span>OFFICIAL REPORTS</span></div>
+            <div><strong>{incidentLoading ? "—" : officialReportCount}</strong><span>OFFICIAL REPORTS</span></div>
             <div><strong>{Number(postStats.active || 0)}</strong><span>FIELD POSTS</span></div>
           </div>
         </div>
@@ -694,7 +763,7 @@ function App() {
             <small>เลเยอร์แผนที่</small>
             <div className="pill-row">
               <button className={overlay === "none" ? "active" : ""} onClick={() => setOverlay("none")}><Layers3 size={14} /> Base map</button>
-              <button disabled={!floodConfig?.gistda?.enabled} title={floodConfig?.gistda?.enabled ? "GISTDA flood satellite · latest 1 day" : "ตั้งค่า GISTDA_PUBLIC_KEY เพื่อเปิดชั้นนี้"} className={overlay === "flood" ? "active flood-layer-pill" : "flood-layer-pill"} onClick={() => floodConfig?.gistda?.enabled && setOverlay("flood")}>Flood satellite</button>
+              <button disabled={!floodConfig?.gistda?.enabled} title={floodConfig?.gistda?.enabled ? `GISTDA flood satellite · latest ${days} day` : "ตั้งค่า GISTDA_PUBLIC_KEY เพื่อเปิดชั้นนี้"} className={overlay === "flood" ? "active flood-layer-pill" : "flood-layer-pill"} onClick={() => floodConfig?.gistda?.enabled && setOverlay("flood")}>Flood satellite</button>
               <button className={overlay === "radar" ? "active" : ""} onClick={() => setOverlay("radar")}>Radar</button>
               <button className={overlay === "sat-ir" ? "active" : ""} onClick={() => setOverlay("sat-ir")}>Sat IR</button>
               <button className={overlay === "sat-rgb" ? "active" : ""} onClick={() => setOverlay("sat-rgb")}>Sat RGB</button>
@@ -707,10 +776,52 @@ function App() {
           </div>
         </div>
 
+        <div className="context-bar">
+          <div className="timeline-control">
+            <span>TIME WINDOW</span>
+            <div>
+              {[1,3,7].map((d) => (
+                <button key={d} className={days === d ? "active" : ""} onClick={() => { setDays(d as 1 | 3 | 7); setSelected(null); }}>
+                  {d}D
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="geo-filters">
+            <label>
+              <span>PROVINCE</span>
+              <select value={geoFilter.province} onChange={e => setGeoFilter({ province: e.target.value, district: "", subdistrict: "" })}>
+                <option value="">ทั่วประเทศ</option>
+                {geoOptions.provinces.map(x => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>DISTRICT</span>
+              <select value={geoFilter.district} disabled={!geoOptions.districts.length} onChange={e => setGeoFilter(v => ({ ...v, district: e.target.value, subdistrict: "" }))}>
+                <option value="">ทุกอำเภอ/เขต</option>
+                {geoOptions.districts.map(x => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>SUBDISTRICT</span>
+              <select value={geoFilter.subdistrict} disabled={!geoOptions.subdistricts.length} onChange={e => setGeoFilter(v => ({ ...v, subdistrict: e.target.value }))}>
+                <option value="">ทุกตำบล/แขวง</option>
+                {geoOptions.subdistricts.map(x => <option key={x} value={x}>{x}</option>)}
+              </select>
+            </label>
+            {(geoFilter.province || geoFilter.district || geoFilter.subdistrict) && (
+              <button className="geo-reset" onClick={() => setGeoFilter({ province: "", district: "", subdistrict: "" })}><X size={14} /> Reset</button>
+            )}
+          </div>
+        </div>
+
         <div className="map-stage">
           <NationalMap
             collection={combined}
             filter={filter}
+            geoFilter={geoFilter}
+            days={days}
             overlay={overlay}
             radar={radar}
             satellite={satellite}
@@ -771,6 +882,31 @@ function App() {
                     <Users size={15} />
                     <span>แสดงเพียง metadata/thumbnail และลิงก์กลับไปยังโพสต์ต้นฉบับ ไม่ได้คัดลอกวิดีโอมาเก็บใน WINTER</span>
                   </div>
+                </>
+              ) : ["traffy-flood","dpm-incident"].includes(selected.kind) ? (
+                <>
+                  <div className="event-kicker">{selected.kind === "traffy-flood" ? "GPS FIELD INCIDENT" : "OFFICIAL DPM INCIDENT"}</div>
+                  <h2>{selected.name || selected.province || "รายงานน้ำท่วม"}</h2>
+                  <div className="event-label">{selected.label}</div>
+                  {selected.photo && (
+                    <div className="report-media">
+                      <img src={selected.photo} alt="" loading="lazy" referrerPolicy="no-referrer" onError={(e) => { e.currentTarget.parentElement!.style.display = "none"; }} />
+                    </div>
+                  )}
+                  <p className="report-title">{selected.detail || selected.title || selected.address || "รายงานสถานการณ์น้ำท่วม"}</p>
+                  <div className="report-meta">
+                    <span>{selected.province || "—"}</span>
+                    {selected.district && <span>{selected.district}</span>}
+                    {selected.subdistrict && <span>{selected.subdistrict}</span>}
+                    <span>{selected.locationAccuracy === "gps" ? "GPS exact" : selected.locationAccuracy || "approximate"}</span>
+                    <span>{selected.observedAt ? timeLabel(selected.observedAt) : "ล่าสุด"}</span>
+                  </div>
+                  {selected.address && <div className="source-note"><MapPinned size={15} /><span>{selected.address}</span></div>}
+                  {selected.sourceUrl && (
+                    <a className="source-link" href={selected.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      เปิดข้อมูลต้นทาง <ExternalLink size={14} />
+                    </a>
+                  )}
                 </>
               ) : ["water-station","rain-station","road-flood-sensor"].includes(selected.kind) ? (
                 <>
@@ -858,7 +994,7 @@ function App() {
               }}>
                 <div className="signal-card-icon"><Icon size={20} /></div>
                 <div><strong>{p.name}</strong><span>{p.label}</span></div>
-                <div className="signal-card-value">{p.value != null ? `${Number(p.value).toFixed(p.kind === "water-station" ? 2 : 0)} ${p.unit || ""}` : `${Math.round(Number(p.temperature || 0))}°`}</div>
+                <div className="signal-card-value">{p.value != null ? `${Number(p.value).toFixed(p.kind === "water-station" ? 2 : 0)} ${p.unit || ""}` : ["traffy-flood","dpm-incident"].includes(p.kind) ? (p.locationAccuracy === "gps" ? "GPS" : "DPM") : `${Math.round(Number(p.temperature || 0))}°`}</div>
               </button>
             );
           })}
@@ -866,6 +1002,8 @@ function App() {
       </section>
 
       <section className="source-band">
+        <span><MapPinned size={15} /> DPM Reporter · official incidents</span>
+        <span><Users size={15} /> Traffy Fondue · GPS flood reports</span>
         <span><Droplets size={15} /> ThaiWater · HII water & rain stations</span>
         <span><Layers3 size={15} /> GISTDA satellite flood layer</span>
         <span><CloudRain size={15} /> RainViewer radar</span>

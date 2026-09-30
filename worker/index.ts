@@ -1143,10 +1143,119 @@ async function kickDiscovery(request: Request, env: Env) {
 }
 
 
+
+const TRAFFY_API = "https://publicapi.traffy.in.th/share/teamchadchart/search";
+const DPM_HOME = "https://dpmreporter.disaster.go.th/portal/";
+
+function dpmObservedAt(text: string) {
+  const months: Record<string, number> = {
+    "มกราคม":1,"กุมภาพันธ์":2,"มีนาคม":3,"เมษายน":4,"พฤษภาคม":5,"มิถุนายน":6,
+    "กรกฎาคม":7,"สิงหาคม":8,"กันยายน":9,"ตุลาคม":10,"พฤศจิกายน":11,"ธันวาคม":12
+  };
+  const m = text.match(/(\d{1,2})\s+(มกราคม|กุมภาพันธ์|มีนาคม|เมษายน|พฤษภาคม|มิถุนายน|กรกฎาคม|สิงหาคม|กันยายน|ตุลาคม|พฤศจิกายน|ธันวาคม)\s+(\d{4})\s*\|?\s*(\d{1,2}:\d{2})/);
+  if (!m) return "";
+  let year = Number(m[3]);
+  if (year > 2400) year -= 543;
+  const month = String(months[m[2]]).padStart(2, "0");
+  const day = String(Number(m[1])).padStart(2, "0");
+  return new Date(`${year}-${month}-${day}T${m[4]}:00+07:00`).toISOString();
+}
+
+function dpmArea(text: string) {
+  const normalized = text.replace(/\s+/g, " ");
+  const subdistrict = normalized.match(/(?:ตำบล|ต\.)\s*([^\s,]+)/)?.[1] || "";
+  const district = normalized.match(/(?:อำเภอ|อ\.)\s*([^\s,]+)/)?.[1] || "";
+  return { subdistrict, district };
+}
+
+function dpmAddress(text: string) {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  const m = normalized.match(/((?:บริเวณ|บ้าน|หมู่บ้าน|หมู่ที่|ม\.|ถนน|ถ\.|ตำบล|ต\.)[^|]{0,260}?(?:จังหวัด|จ\.)\s*[^\s,.<]+)/);
+  return (m?.[1] || normalized.slice(0, 280)).trim();
+}
+
+async function dpmIncidents(url: URL, ctx: any) {
+  const requested = Number(url.searchParams.get("days") || 1);
+  const days = requested === 7 ? 7 : requested === 3 ? 3 : 1;
+  const html = await cachedText(DPM_HOME, 900, ctx);
+  const re = /<a[^>]+href=["']([^"']*\/portal\/disaster-news\/(\d+))["'][^>]*>([\s\S]*?)<\/a>/gi;
+  const features: any[] = [];
+  const seen = new Set<string>();
+  const now = Date.now();
+
+  for (const match of html.matchAll(re)) {
+    const id = String(match[2] || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+
+    const index = match.index || 0;
+    const context = stripHtml(html.slice(Math.max(0, index - 1800), Math.min(html.length, index + 800)));
+    const title = stripHtml(match[3] || "");
+    const text = `${title} ${context}`;
+    if (!/(อุทกภัย|น้ำท่วม|น้ำป่า|น้ำหลาก|น้ำล้น|น้ำทะเลหนุน|ฝนตกหนัก)/i.test(text)) continue;
+
+    const observedAt = dpmObservedAt(text);
+    if (observedAt) {
+      const age = now - Date.parse(observedAt);
+      if (age < -6 * 3600_000 || age > days * 86400_000) continue;
+    }
+
+    const province = findProvince(text);
+    if (!province) continue;
+    const specific = findSpecificPlace(text);
+    const area = dpmArea(text);
+    const address = dpmAddress(context);
+    const severity = /(น้ำป่า|น้ำหลาก|ล้นตลิ่ง|บ้านเรือน|ผ่านไม่ได้|อพยพ)/i.test(text) ? 3 : 2;
+    const href = String(match[1] || "");
+    const sourceUrl = href.startsWith("http") ? href : `https://dpmreporter.disaster.go.th${href.startsWith("/") ? "" : "/"}${href}`;
+
+    features.push({
+      type: "Feature",
+      geometry: {
+        type: "Point",
+        coordinates: [Number(specific?.lon ?? province.lon), Number(specific?.lat ?? province.lat)]
+      },
+      properties: {
+        id: `dpm-${id}`,
+        kind: "dpm-incident",
+        eventType: "flood",
+        sourceType: "official",
+        source: "DPM Reporter · DDPM",
+        fieldReport: true,
+        exactLocation: Boolean(specific),
+        locationAccuracy: specific ? "text-place" : "province-centroid",
+        name: specific?.label || area.subdistrict || area.district || province.th,
+        province: province.th,
+        district: area.district,
+        subdistrict: area.subdistrict,
+        address,
+        title: title || "รายงานสถานการณ์อุทกภัย",
+        label: "รายงานอุทกภัย ปภ.",
+        severity,
+        observedAt: observedAt || new Date().toISOString(),
+        sourceUrl,
+        agency: "กรมป้องกันและบรรเทาสาธารณภัย"
+      }
+    });
+  }
+
+  return json({
+    type: "FeatureCollection",
+    features,
+    meta: {
+      total: features.length,
+      days,
+      source: "DPM Reporter",
+      accuracyNote: "GPS เมื่อข้อความระบุจุดที่ระบบรู้จัก มิฉะนั้นใช้จุดอ้างอิงระดับจังหวัดและแสดง locationAccuracy กำกับ",
+      updatedAt: new Date().toISOString()
+    }
+  }, 200, 300);
+}
+
 const THAIWATER_BASE = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public";
 const GISTDA_BASE = "https://api-gateway.gistda.or.th/api/2.0/resources";
 
-async function proxyJsonFeed(request: Request, upstream: string, ttl: number, ctx: any) {
+async function proxyJsonFeed(request: Request, upstream: string, ttl: number, ctx: any, source = "upstream") {
   const cache = (caches as unknown as { default: Cache }).default;
   const key = new Request(request.url, { method: "GET" });
   const hit = await cache.match(key);
@@ -1168,21 +1277,25 @@ async function proxyJsonFeed(request: Request, upstream: string, ttl: number, ct
     headers: {
       ...JSON_HEADERS,
       "cache-control": `public, max-age=${Math.min(ttl, 300)}, s-maxage=${ttl}, stale-while-revalidate=${ttl * 2}`,
-      "x-winter-source": "thaiwater"
+      "x-winter-source": source
     }
   });
   ctx.waitUntil(cache.put(key, out.clone()));
   return out;
 }
 
-async function floodConfig(env: Env, ctx: any) {
+async function floodConfig(request: Request, env: Env, ctx: any) {
+  const cfgUrl = new URL(request.url);
+  const requestedDays = Number(cfgUrl.searchParams.get("days") || 1);
+  const days = requestedDays === 7 ? 7 : requestedDays === 3 ? 3 : 1;
+  const period = days === 7 ? "7days" : days === 3 ? "3days" : "1day";
   const publicKey = String(env.GISTDA_PUBLIC_KEY || "").trim();
   const serverKey = String(env.GISTDA_API_KEY || "").trim();
   let summary: any = null;
   let summaryError = "";
 
   if (serverKey) {
-    const endpoint = `${GISTDA_BASE}/features/flood/1day?api_key=${encodeURIComponent(serverKey)}&limit=1`;
+    const endpoint = `${GISTDA_BASE}/features/flood/${period}?api_key=${encodeURIComponent(serverKey)}&limit=1`;
     try {
       const data: any = await cachedJson(endpoint, 900, ctx);
       const p = data?.features?.[0]?.properties || {};
@@ -1200,9 +1313,10 @@ async function floodConfig(env: Env, ctx: any) {
   return json({
     gistda: {
       enabled: Boolean(publicKey),
-      period: "1day",
+      period,
+      days,
       tileTemplate: publicKey
-        ? `${GISTDA_BASE}/maps/flood/1day/tms/{z}/{x}/{y}?api_key=${encodeURIComponent(publicKey)}`
+        ? `${GISTDA_BASE}/maps/flood/${period}/tms/{z}/{x}/{y}?api_key=${encodeURIComponent(publicKey)}`
         : null,
       summary,
       summaryAvailable: Boolean(serverKey),
@@ -1251,10 +1365,16 @@ export default {
       if (url.pathname === "/api/discovery/status") return await discoveryStatus(env);
       if (url.pathname === "/api/discovery/kick" && request.method === "POST") return await kickDiscovery(request, env);
       if (url.pathname === "/api/posts/discover/youtube") return await youtubeDiscover(url, env);
+      if (url.pathname === "/api/incidents/dpm") return await dpmIncidents(url, ctx);
+      if (url.pathname === "/api/incidents/traffy") {
+        const offset = Math.max(0, Math.min(3000, Number(url.searchParams.get("offset") || 0)));
+        const limit = Math.max(100, Math.min(1000, Number(url.searchParams.get("limit") || 1000)));
+        return await proxyJsonFeed(request, `${TRAFFY_API}?limit=${limit}&offset=${offset}`, 300, ctx, "traffy");
+      }
       if (url.pathname === "/api/hydro/waterlevel") return await proxyJsonFeed(request, `${THAIWATER_BASE}/waterlevel_load`, 300, ctx);
       if (url.pathname === "/api/hydro/rain24h") return await proxyJsonFeed(request, `${THAIWATER_BASE}/rain_24h`, 600, ctx);
       if (url.pathname === "/api/hydro/flood-road") return await proxyJsonFeed(request, `${THAIWATER_BASE}/flood_road`, 180, ctx);
-      if (url.pathname === "/api/flood/config") return await floodConfig(env, ctx);
+      if (url.pathname === "/api/flood/config") return await floodConfig(request, env, ctx);
       if (url.pathname === "/api/satellite") return await satellite(ctx);
       return new Response("Not found", { status: 404 });
     } catch (error: any) {
